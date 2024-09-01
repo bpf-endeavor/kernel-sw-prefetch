@@ -86,6 +86,13 @@ config BPF_UNPRIV_DEFAULT_OFF
 
 	  If you are unsure how to answer this question, answer Y.
 
+config BPF_JIT_PREFETCH
+	  bool "Enable prefetch instruction in BPF JIT"
+	  depends on HAVE_EBPF_JIT
+	  default n
+	  help
+	  Enable prefetch instruction in BPF JIT
+
 source "kernel/bpf/preload/Kconfig"
 
 config BPF_LSM

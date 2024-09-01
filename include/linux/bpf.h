@@ -1529,6 +1529,7 @@ struct bpf_prog {
 				dst_needed:1,	/* Do we need dst entry? */
 				blinding_requested:1, /* needs constant blinding */
 				blinded:1,	/* Was blinded */
+				sw_prefetch:1,	/* Software prefetcher pass was applied */
 				is_func:1,	/* program is a bpf function */
 				kprobe_override:1, /* Do we override a kprobe? */
 				has_callchain_buf:1, /* callchain buffer allocated? */
