@@ -1673,6 +1673,21 @@ static const struct bpf_func_proto bpf_dynptr_data_proto = {
 	.arg3_type	= ARG_CONST_ALLOC_SIZE_OR_ZERO,
 };
 
+/* NOTE: calls to this helper MUST be overwritten by the JIT and appropriate
+ * prefetch instruction must be issued.
+ * */
+BPF_CALL_1(bpf_prefetch, void *, ptr__ign)
+{
+	return 0;
+}
+
+static const struct bpf_func_proto bpf_prefetch_proto = {
+	.func		= bpf_prefetch,
+	.gpl_only	= false,
+	.ret_type	= RET_INTEGER,
+	.arg1_type	= ARG_ANYTHING,
+};
+
 const struct bpf_func_proto bpf_get_current_task_proto __weak;
 const struct bpf_func_proto bpf_get_current_task_btf_proto __weak;
 const struct bpf_func_proto bpf_probe_read_user_proto __weak;
@@ -1729,6 +1744,8 @@ bpf_base_func_proto(enum bpf_func_id func_id)
 		return &bpf_strtol_proto;
 	case BPF_FUNC_strtoul:
 		return &bpf_strtoul_proto;
+	case BPF_FUNC_prefetch:
+		return &bpf_prefetch_proto;
 	default:
 		break;
 	}

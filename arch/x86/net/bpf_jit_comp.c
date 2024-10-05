@@ -1155,6 +1155,11 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image, u8 *rw_image
 	u8 *prog = temp;
 	int err;
 
+	/* Farbod: I added these for finding calls to `bpf_prefetch' */
+	const struct bpf_func_proto *_fn = \
+		bpf_base_func_proto(BPF_FUNC_prefetch);
+	const s32 prefetch_offset = _fn->func - __bpf_call_base;
+
 	detect_reg_usage(insn, insn_cnt, callee_regs_used,
 			 &tail_call_seen);
 
@@ -1755,7 +1760,34 @@ st:			if (is_imm8(insn->off))
 		case BPF_JMP | BPF_CALL: {
 			int offs;
 
+			/* NOTE: The verifier has converted the imm32 which supposed
+			 * to have the helper id to the helper function offset.
+			 *
+			 * To find which function it is, I am checking offset
+			 * of function I want (bpf_prefetch) with the offset of
+			 * function being called.
+			 * */
 			func = (u8 *) __bpf_call_base + imm32;
+			/* printk("%d -- %d", imm32, prefetch_offset); */
+			if (imm32 == prefetch_offset) {
+				printk("Replace a call to bpf_prefetch!");
+				/* Let's emit a prefetch insn.
+				 * The memory address is passed in the first
+				 * argument which will be in BPF_REG_1.
+				 * */
+				EMIT2(0x0F, 0x18);
+				/* mapping the register number to the value I
+				 * want */
+				enum {
+					PREFETCHNTA = 0,
+					PREFETCH1 = 4,
+					PREFETCH2 = 3,
+					PREFETCH3 = 6,
+				};
+				emit_insn_suffix(&prog, BPF_REG_1, PREFETCH1, 0);
+				break; /* done */
+			}
+
 			if (tail_call_reachable) {
 				RESTORE_TAIL_CALL_CNT(bpf_prog->aux->stack_depth);
 				if (!imm32)
