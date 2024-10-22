@@ -1159,6 +1159,8 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image, u8 *rw_image
 	const struct bpf_func_proto *_fn = \
 		bpf_base_func_proto(BPF_FUNC_prefetch);
 	const s32 prefetch_offset = _fn->func - __bpf_call_base;
+	_fn = bpf_base_func_proto(BPF_FUNC_prefetch_1);
+	const s32 prefetch_1_offset = _fn->func - __bpf_call_base;
 
 	detect_reg_usage(insn, insn_cnt, callee_regs_used,
 			 &tail_call_seen);
@@ -1776,14 +1778,10 @@ st:			if (is_imm8(insn->off))
 				 * argument which will be in BPF_REG_1.
 				 * */
 				EMIT2(0x0F, 0x18);
-				/* mapping the register number to the value I
-				 * want */
-				enum {
-					PREFETCHNTA = 0,
-					PREFETCH1 = 4,
-					PREFETCH2 = 3,
-					PREFETCH3 = 6,
-				};
+				emit_insn_suffix(&prog, BPF_REG_1, PREFETCH0, 0);
+				break; /* done */
+			} else if(imm32 == prefetch_1_offset) {
+				EMIT2(0x0F, 0x18);
 				emit_insn_suffix(&prog, BPF_REG_1, PREFETCH1, 0);
 				break; /* done */
 			}

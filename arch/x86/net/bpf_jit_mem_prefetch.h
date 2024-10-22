@@ -23,6 +23,15 @@
 /* } */
 #endif
 
+/* mapping the register number to the value I
+ * want */
+enum {
+	PREFETCHNTA = 0,
+	PREFETCH0 = 4,
+	PREFETCH1 = 3,
+	PREFETCH2 = 6,
+};
+
 
 /* Entry function to prefetching phase */
 struct bpf_prog *bpf_x86_jit_mem_prefetch(struct bpf_prog *prog);

@@ -5686,6 +5686,12 @@ union bpf_attr {
  *	Return
  *		Not important
  *
+ * long bpf_prefetch_1(void *ptr)
+ *	Description
+ *		Prefetch a pointer
+ *	Return
+ *		Not important
+ *
  */
 #define ___BPF_FUNC_MAPPER(FN, ctx...)			\
 	FN(unspec, 0, ##ctx)				\
@@ -5901,6 +5907,7 @@ union bpf_attr {
 	FN(cgrp_storage_get, 210, ##ctx)		\
 	FN(cgrp_storage_delete, 211, ##ctx)		\
 	FN(prefetch, 212, ##ctx)			\
+	FN(prefetch_1, 213, ##ctx)			\
 	/* */
 
 /* backwards-compatibility macros for users of __BPF_FUNC_MAPPER that don't
