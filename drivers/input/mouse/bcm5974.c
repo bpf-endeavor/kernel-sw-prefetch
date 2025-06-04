@@ -19,7 +19,6 @@
  * Copyright (C) 2006	   Nicolas Boichat (nicolas@boichat.ch)
  */
 
-#include "linux/usb.h"
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
@@ -194,8 +193,6 @@ enum tp_type {
 
 /* list of device capability bits */
 #define HAS_INTEGRATED_BUTTON	1
-/* maximum number of supported endpoints (currently trackpad and button) */
-#define MAX_ENDPOINTS	2
 
 /* trackpad finger data block size */
 #define FSIZE_TYPE1		(14 * sizeof(__le16))
@@ -837,13 +834,11 @@ static int bcm5974_open(struct input_dev *input)
 	if (error)
 		return error;
 
-	mutex_lock(&dev->pm_mutex);
-
-	error = bcm5974_start_traffic(dev);
-	if (!error)
-		dev->opened = 1;
-
-	mutex_unlock(&dev->pm_mutex);
+	scoped_guard(mutex, &dev->pm_mutex) {
+		error = bcm5974_start_traffic(dev);
+		if (!error)
+			dev->opened = 1;
+	}
 
 	if (error)
 		usb_autopm_put_interface(dev->intf);
@@ -855,12 +850,10 @@ static void bcm5974_close(struct input_dev *input)
 {
 	struct bcm5974 *dev = input_get_drvdata(input);
 
-	mutex_lock(&dev->pm_mutex);
-
-	bcm5974_pause_traffic(dev);
-	dev->opened = 0;
-
-	mutex_unlock(&dev->pm_mutex);
+	scoped_guard(mutex, &dev->pm_mutex) {
+		bcm5974_pause_traffic(dev);
+		dev->opened = 0;
+	}
 
 	usb_autopm_put_interface(dev->intf);
 }
@@ -869,12 +862,10 @@ static int bcm5974_suspend(struct usb_interface *iface, pm_message_t message)
 {
 	struct bcm5974 *dev = usb_get_intfdata(iface);
 
-	mutex_lock(&dev->pm_mutex);
+	guard(mutex)(&dev->pm_mutex);
 
 	if (dev->opened)
 		bcm5974_pause_traffic(dev);
-
-	mutex_unlock(&dev->pm_mutex);
 
 	return 0;
 }
@@ -882,28 +873,13 @@ static int bcm5974_suspend(struct usb_interface *iface, pm_message_t message)
 static int bcm5974_resume(struct usb_interface *iface)
 {
 	struct bcm5974 *dev = usb_get_intfdata(iface);
-	int error = 0;
 
-	mutex_lock(&dev->pm_mutex);
+	guard(mutex)(&dev->pm_mutex);
 
 	if (dev->opened)
-		error = bcm5974_start_traffic(dev);
+		return bcm5974_start_traffic(dev);
 
-	mutex_unlock(&dev->pm_mutex);
-
-	return error;
-}
-
-static bool bcm5974_check_endpoints(struct usb_interface *iface,
-				    const struct bcm5974_config *cfg)
-{
-	u8 ep_addr[MAX_ENDPOINTS + 1] = {0};
-
-	ep_addr[0] = cfg->tp_ep;
-	if (cfg->tp_type == TYPE1)
-		ep_addr[1] = cfg->bt_ep;
-
-	return usb_check_int_endpoints(iface, ep_addr);
+	return 0;
 }
 
 static int bcm5974_probe(struct usb_interface *iface,
@@ -918,13 +894,8 @@ static int bcm5974_probe(struct usb_interface *iface,
 	/* find the product index */
 	cfg = bcm5974_get_config(udev);
 
-	if (!bcm5974_check_endpoints(iface, cfg)) {
-		dev_err(&iface->dev, "Unexpected non-int endpoint\n");
-		return -ENODEV;
-	}
-
 	/* allocate memory for our device state and initialize it */
-	dev = kzalloc(sizeof(struct bcm5974), GFP_KERNEL);
+	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	input_dev = input_allocate_device();
 	if (!dev || !input_dev) {
 		dev_err(&iface->dev, "out of memory\n");
