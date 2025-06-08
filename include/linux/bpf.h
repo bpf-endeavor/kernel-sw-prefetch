@@ -1662,6 +1662,7 @@ struct bpf_prog {
 		DECLARE_FLEX_ARRAY(struct sock_filter, insns);
 		DECLARE_FLEX_ARRAY(struct bpf_insn, insnsi);
 	};
+	bool batching_aware;
 };
 
 struct bpf_array_aux {

@@ -14,3 +14,9 @@ config XDP_SOCKETS_DIAG
 	help
 	  Support for PF_XDP sockets monitoring interface used by the ss tool.
 	  If unsure, say Y.
+
+config XDP_BATCHING
+	bool "XDP batching support"
+	default n
+	help
+	 change eBPF/XDP API to receive a batch of packets instead of one 

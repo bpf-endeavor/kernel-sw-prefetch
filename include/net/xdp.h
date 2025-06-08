@@ -89,6 +89,18 @@ struct xdp_buff {
 	u32 flags; /* supported values defined in xdp_buff_flags */
 };
 
+#ifdef CONFIG_XDP_BATCHING
+#ifndef XDP_MAX_BATCH_SIZE
+// other definition is at include/uapi/linux/bpf.h
+#define XDP_MAX_BATCH_SIZE 32
+#endif
+struct xdp_batch_buff {
+	unsigned short size;
+	struct xdp_buff buffs[XDP_MAX_BATCH_SIZE];
+	unsigned int actions[XDP_MAX_BATCH_SIZE];
+};
+#endif
+
 static __always_inline bool xdp_buff_has_frags(const struct xdp_buff *xdp)
 {
 	return !!(xdp->flags & XDP_FLAGS_HAS_FRAGS);

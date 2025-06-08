@@ -9106,11 +9106,66 @@ static bool __is_valid_xdp_access(int off, int size)
 	return true;
 }
 
+#ifdef CONFIG_XDP_BATCHING
+static inline bool xdp_batch_is_valid_access(int off, int size,
+				enum bpf_access_type type,
+				const struct bpf_prog *prog,
+				struct bpf_insn_access_aux *info)
+{
+	// if offset is out of context
+	if (off < 0 || off > sizeof(struct xdp_batch_md))
+		return false;
+	// check the writes are only on actions field
+	u32 actions_array = offsetof(struct xdp_batch_md, actions);
+	u32 actions_array_end = actions_array + sizeof(u32) * XDP_MAX_BATCH_SIZE;
+	if (type == BPF_WRITE) {
+		if (off < actions_array || off > actions_array_end)
+			return false;
+		bool is_align_write = (off - actions_array) % sizeof(u32) == 0;
+		if (size != sizeof(unsigned int) || !is_align_write)
+			return false;
+	}
+	// here we have reads
+	// TODO: what is LDSX  ??
+
+	// Let's find if the field is pointer to packet/packet_end
+	// check if its reading an xdp_md from the array
+	u32 buffs_begin = offsetof(struct xdp_batch_md, buffs);
+	u32 buffs_size = sizeof(struct xdp_md) * XDP_MAX_BATCH_SIZE;
+	if (off >= buffs_begin && off < buffs_begin + buffs_size) {
+		// figure out which index of the array we are accessing
+		u16 index = (off - buffs_begin) / sizeof(struct xdp_md);
+		// figure out which field of the ``struct xdp_md'' we are accessing
+		u16 remaining = (off - buffs_begin) - (index * sizeof(struct xdp_md));
+		switch (remaining) {
+			case offsetof(struct xdp_md, data):
+				info->reg_type = PTR_TO_PACKET;
+				break;
+			case offsetof(struct xdp_md, data_meta):
+				info->reg_type = PTR_TO_PACKET_META;
+				break;
+			case offsetof(struct xdp_md, data_end):
+				info->reg_type = PTR_TO_PACKET_END;
+				break;
+		}
+	}
+	return true;
+}
+#endif
+
 static bool xdp_is_valid_access(int off, int size,
 				enum bpf_access_type type,
 				const struct bpf_prog *prog,
 				struct bpf_insn_access_aux *info)
 {
+#ifdef CONFIG_XDP_BATCHING
+	/* Check if the access to the batched context is valid
+	 * */
+	if (prog->batching_aware == 1) {
+		return xdp_batch_is_valid_access(off, size, type, prog, info);
+	}
+#endif
+
 	if (prog->expected_attach_type != BPF_XDP_DEVMAP) {
 		switch (off) {
 		case offsetof(struct xdp_md, egress_ifindex):
@@ -10190,11 +10245,136 @@ static u32 tc_cls_act_convert_ctx_access(enum bpf_access_type type,
 	return insn - insn_buf;
 }
 
+#ifdef CONFIG_XDP_BATCHING
+/* I should create a mapping between these two structures:
+ * struct xdp_batch_md {
+ * 	u16 size;
+ * 	struct xdp_md buffs[XDP_MAX_BATCH_SIZE];
+ * 	u32 actions[XDP_MAX_BATCH_SIZE];
+ * };
+ *
+ *
+ * struct xdp_batch_buff {
+ * 	u16 size;
+ * 	struct xdp_buff buffs[XDP_MAX_BATCH_SIZE];
+ * 	u32 actions[XDP_MAX_BATCH_SIZE];
+ * }
+ *
+ * */
+static inline u32 xdp_batch_ctx_access(enum bpf_access_type type,
+		const struct bpf_insn *si,
+		struct bpf_insn *insn_buf,
+		struct bpf_prog *prog, u32 *target_size)
+{
+	s16 array_begin_off;
+	s16 array_size;
+	s16 off;
+	struct bpf_insn *insn = insn_buf;
+
+	// the program wants to access this offset
+	off = si->off;
+
+	// if it is reading the size field, then ...
+	if (off == offsetof(struct xdp_batch_md, size)) {
+		*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_batch_buff, size),
+				si->dst_reg, si->src_reg,
+				offsetof(struct xdp_batch_buff, size));
+		return insn - insn_buf;
+	}
+
+	// check if its reading an xdp_md from the array
+	array_begin_off = offsetof(struct xdp_batch_md, buffs);
+	array_size = sizeof(struct xdp_md) * XDP_MAX_BATCH_SIZE;
+	if (off >= array_begin_off && off < array_begin_off + array_size) {
+		// figure out which index of the array we are accessing
+		u16 index = (off - array_begin_off) / sizeof(struct xdp_md);
+		// figure out which field of the ``struct xdp_md'' we are accessing
+		u16 remaining = (off - array_begin_off) - (index * sizeof(struct xdp_md));
+
+		s16 indexed_object = offsetof(struct xdp_batch_buff, buffs) +
+			(index * sizeof(struct xdp_batch_buff));
+		// copy-paste of what was originally written (code below this
+		// function) for converting xdp_md to xdp_buff
+		switch (remaining) {
+			case offsetof(struct xdp_md, data):
+				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data),
+						si->dst_reg, si->src_reg,
+						offsetof(struct xdp_buff, data) + indexed_object);
+				break;
+			case offsetof(struct xdp_md, data_meta):
+				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data_meta),
+						si->dst_reg, si->src_reg,
+						offsetof(struct xdp_buff, data_meta) + indexed_object);
+				break;
+			case offsetof(struct xdp_md, data_end):
+				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data_end),
+						si->dst_reg, si->src_reg,
+						offsetof(struct xdp_buff, data_end) + indexed_object);
+				break;
+			case offsetof(struct xdp_md, ingress_ifindex):
+				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, rxq),
+						si->dst_reg, si->src_reg,
+						offsetof(struct xdp_buff, rxq) + indexed_object);
+				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_rxq_info, dev),
+						si->dst_reg, si->dst_reg,
+						offsetof(struct xdp_rxq_info, dev));
+				*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg,
+						offsetof(struct net_device, ifindex));
+				break;
+			case offsetof(struct xdp_md, rx_queue_index):
+				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, rxq),
+						si->dst_reg, si->src_reg,
+						offsetof(struct xdp_buff, rxq) + indexed_object);
+				*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg,
+						offsetof(struct xdp_rxq_info,
+							queue_index));
+				break;
+			case offsetof(struct xdp_md, egress_ifindex):
+				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, txq),
+						si->dst_reg, si->src_reg,
+						offsetof(struct xdp_buff, txq) + indexed_object);
+				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_txq_info, dev),
+						si->dst_reg, si->dst_reg,
+						offsetof(struct xdp_txq_info, dev));
+				*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg,
+						offsetof(struct net_device, ifindex));
+				break;
+		}
+		return insn - insn_buf;
+	}
+
+	// check if we are accessing the actions array
+	array_begin_off = offsetof(struct xdp_batch_md, actions);
+	array_size = sizeof(unsigned int) * XDP_MAX_BATCH_SIZE;
+	if (off >= array_begin_off && off < array_begin_off + array_size) {
+		u32 index = (off - array_begin_off) / sizeof(u32);
+		u32 remaining = (off - array_begin_off) - (index * sizeof(u32));
+		// actions do not have subfields, the access shuolud be aligned
+		if (remaining == 0) {
+			s16 indexed_object = \
+				offsetof(struct xdp_batch_buff, actions) +
+				(index * sizeof(u32));
+			*insn++ = BPF_LDX_MEM(sizeof(u32),
+					si->dst_reg, si->src_reg,
+					indexed_object);
+		}
+		return insn - insn_buf;
+	}
+	return insn - insn_buf;
+}
+#endif
+
 static u32 xdp_convert_ctx_access(enum bpf_access_type type,
 				  const struct bpf_insn *si,
 				  struct bpf_insn *insn_buf,
 				  struct bpf_prog *prog, u32 *target_size)
 {
+#ifdef CONFIG_XDP_BATCHING
+	// Farbod: check if it is a program with batching capability
+	if (prog->batching_aware)
+		return xdp_batch_ctx_access(type, si, insn_buf, prog, target_size);
+#endif
+
 	struct bpf_insn *insn = insn_buf;
 
 	switch (si->off) {
