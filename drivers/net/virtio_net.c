@@ -3043,6 +3043,7 @@ err:
 		// the current packet was not good :). ignore it
 	}
 	xdp_rx_batch.batch.size = packets; // set the size of the batch
+	printk("batch sz: %d\n", packets);
 
 	// batch apply this:
 	/* act = virtnet_xdp_handler(xdp_prog, &xdp, dev, xdp_xmit, stats); */
@@ -3201,6 +3202,7 @@ static int virtnet_receive_packets(struct virtnet_info *vi,
 		}
 	}
 
+	printk("well, our batching code did not ran!\n");
 	return packets;
 }
 

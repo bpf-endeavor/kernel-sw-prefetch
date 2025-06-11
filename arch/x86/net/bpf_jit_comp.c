@@ -2329,7 +2329,7 @@ populate_extable:
 			func = (u8 *) __bpf_call_base + imm32;
 			/* printk("%d -- %d", imm32, prefetch_offset); */
 			if (imm32 == prefetch_offset) {
-				printk("Replace a call to bpf_prefetch!");
+				printk("Replace a call to bpf_prefetch!\n");
 				/* Let's emit a prefetch insn.
 				 * The memory address is passed in the first
 				 * argument which will be in BPF_REG_1.
@@ -2338,6 +2338,7 @@ populate_extable:
 				emit_insn_suffix(&prog, BPF_REG_1, PREFETCH0, 0);
 				break; /* done */
 			} else if(imm32 == prefetch_1_offset) {
+				printk("Replace a call to bpf_prefetch_1!\n");
 				EMIT2(0x0F, 0x18);
 				emit_insn_suffix(&prog, BPF_REG_1, PREFETCH1, 0);
 				break; /* done */
@@ -2664,7 +2665,7 @@ emit_jmp:
 			 * 3: prefetch3
 			 * */
 			emit_insn_suffix(&prog, insn->src_reg, 4, off);
-			/* printk("emit prefetch instruction\n"); */
+			printk("emit prefetch instruction\n");
 			break;
 #endif
 

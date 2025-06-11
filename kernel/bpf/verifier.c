@@ -23914,8 +23914,11 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 		return -EINVAL;
 
 	/* Farbod: programs starting with "bbb_" are batching aware */
-	if (strncmp((*prog)->aux->name, "bbb_", 4) == 0)
+	char *prog_name = (*prog)->aux->name;
+	if (prog_name != NULL && strncmp(prog_name, "bbb_", 4) == 0) {
+		printk("Checking a batching aware eBPF program: %s\n", prog_name);
 		(*prog)->batching_aware = true;
+	}
 	/* ------------------------------------------------------------ */
 
 	/* 'struct bpf_verifier_env' can be global, but since it's not small,

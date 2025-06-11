@@ -9107,7 +9107,7 @@ static bool __is_valid_xdp_access(int off, int size)
 }
 
 #ifdef CONFIG_XDP_BATCHING
-static inline bool xdp_batch_is_valid_access(int off, int size,
+static bool xdp_batch_is_valid_access(int off, int size,
 				enum bpf_access_type type,
 				const struct bpf_prog *prog,
 				struct bpf_insn_access_aux *info)
@@ -9117,7 +9117,7 @@ static inline bool xdp_batch_is_valid_access(int off, int size,
 		return false;
 	// check the writes are only on actions field
 	u32 actions_array = offsetof(struct xdp_batch_md, actions);
-	u32 actions_array_end = actions_array + sizeof(u32) * XDP_MAX_BATCH_SIZE;
+	u32 actions_array_end = actions_array + sizeof(unsigned int) * XDP_MAX_BATCH_SIZE;
 	if (type == BPF_WRITE) {
 		if (off < actions_array || off > actions_array_end)
 			return false;
@@ -9161,7 +9161,8 @@ static bool xdp_is_valid_access(int off, int size,
 #ifdef CONFIG_XDP_BATCHING
 	/* Check if the access to the batched context is valid
 	 * */
-	if (prog->batching_aware == 1) {
+	if (prog->batching_aware) {
+		printk("checking access for a batch aware program\n");
 		return xdp_batch_is_valid_access(off, size, type, prog, info);
 	}
 #endif
@@ -10261,14 +10262,15 @@ static u32 tc_cls_act_convert_ctx_access(enum bpf_access_type type,
  * }
  *
  * */
-static inline u32 xdp_batch_ctx_access(enum bpf_access_type type,
+static u32 xdp_batch_convert_ctx_access(enum bpf_access_type type,
 		const struct bpf_insn *si,
 		struct bpf_insn *insn_buf,
 		struct bpf_prog *prog, u32 *target_size)
 {
-	s16 array_begin_off;
-	s16 array_size;
-	s16 off;
+	printk("The xdp_batch_convert_ctx_access is being called\n");
+	s16 array_begin_off = 0;
+	s16 array_size = 0;
+	s16 off = 0;
 	struct bpf_insn *insn = insn_buf;
 
 	// the program wants to access this offset
@@ -10354,8 +10356,8 @@ static inline u32 xdp_batch_ctx_access(enum bpf_access_type type,
 			s16 indexed_object = \
 				offsetof(struct xdp_batch_buff, actions) +
 				(index * sizeof(u32));
-			*insn++ = BPF_LDX_MEM(sizeof(u32),
-					si->dst_reg, si->src_reg,
+			// action is u32 its size is BPF_W
+			*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->src_reg,
 					indexed_object);
 		}
 		return insn - insn_buf;
@@ -10371,8 +10373,10 @@ static u32 xdp_convert_ctx_access(enum bpf_access_type type,
 {
 #ifdef CONFIG_XDP_BATCHING
 	// Farbod: check if it is a program with batching capability
-	if (prog->batching_aware)
-		return xdp_batch_ctx_access(type, si, insn_buf, prog, target_size);
+	if (prog->batching_aware) {
+		printk("converting access to a batch context\n");
+		return xdp_batch_convert_ctx_access(type, si, insn_buf, prog, target_size);
+	}
 #endif
 
 	struct bpf_insn *insn = insn_buf;

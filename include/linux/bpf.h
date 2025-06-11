@@ -1657,12 +1657,12 @@ struct bpf_prog {
 					    const struct bpf_insn *insn);
 	struct bpf_prog_aux	*aux;		/* Auxiliary fields */
 	struct sock_fprog_kern	*orig_prog;	/* Original BPF program */
+	bool batching_aware;
 	/* Instructions for interpreter */
 	union {
 		DECLARE_FLEX_ARRAY(struct sock_filter, insns);
 		DECLARE_FLEX_ARRAY(struct bpf_insn, insnsi);
 	};
-	bool batching_aware;
 };
 
 struct bpf_array_aux {
