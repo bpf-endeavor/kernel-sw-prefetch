@@ -514,6 +514,7 @@ struct recv_batch {
 	struct xdp_batch_buff batch;
 	void *buf[XDP_MAX_BATCH_SIZE];
 	void *page[XDP_MAX_BATCH_SIZE];
+	int num_buf[XDP_MAX_BATCH_SIZE]; // for mergeable buffers
 	u16 buf_len[XDP_MAX_BATCH_SIZE];
 	u8 flags[XDP_MAX_BATCH_SIZE];
 	u32 xmit_frames_used;
@@ -2924,25 +2925,118 @@ static int virtnet_receive_xsk_bufs(struct virtnet_info *vi,
 }
 
 #ifdef CONFIG_XDP_BATCHING
+
+static inline void __xdp_batch_run(
+		unsigned int packets,
+		struct net_device *dev,
+		struct bpf_prog *xdp_prog,
+		struct virtnet_rq_stats *stats,
+		unsigned int *xdp_xmit
+)
+{
+	u32 act = bpf_prog_run(xdp_prog, &xdp_rx_batch.batch);
+
+	// Apply unwrap the action decide for each packet 
+	u64_stats_add(&stats->xdp_packets, packets);
+
+	xdp_rx_batch.xmit_frames_used = 0;
+	for (int k = 0; k < packets; k++) {
+		struct xdp_buff *xdp_ptr = &xdp_rx_batch.batch.buffs[k];
+		act = xdp_rx_batch.batch.actions[k];
+		if (static_branch_unlikely(&bpf_master_redirect_enabled_key)) {
+			if (act == XDP_TX && netif_is_bond_slave(xdp_ptr->rxq->dev))
+				act = xdp_master_redirect(xdp_ptr);
+		}
+		switch(act) {
+			case XDP_PASS:
+				continue;
+			case XDP_TX:
+				u64_stats_inc(&stats->xdp_tx);
+				struct xdp_frame *xdpf = xdp_convert_buff_to_frame(xdp_ptr);
+				if (unlikely(!xdpf)) {
+					netdev_dbg(dev, "convert buff to frame failed for xdp\n");
+					xdp_rx_batch.batch.actions[k] = XDP_DROP;
+					continue;
+				}
+				// keep track of frames we should transmit
+				u32 tmp_index = xdp_rx_batch.xmit_frames_used;
+				xdp_rx_batch.xmit_frames_used++;
+				xdp_rx_batch.xmit_xdp_frames[tmp_index] = xdpf;
+				continue;
+
+			case XDP_REDIRECT:
+				u64_stats_inc(&stats->xdp_redirects);
+				int err = xdp_do_redirect(dev, xdp_ptr, xdp_prog);
+				if (err) {
+					xdp_rx_batch.batch.actions[k] = XDP_DROP;
+					continue;
+				}
+
+				*xdp_xmit |= VIRTIO_XDP_REDIR;
+				continue;
+
+			default:
+				bpf_warn_invalid_xdp_action(dev, xdp_prog, act);
+				fallthrough;
+			case XDP_ABORTED:
+				trace_xdp_exception(dev, xdp_prog, act);
+				xdp_rx_batch.batch.actions[k] = XDP_DROP;
+				continue;
+			case XDP_DROP:
+				continue;
+		}
+	}
+}
+
+static inline void __process_outstanding_xmit_frames(
+	struct net_device *dev,
+	struct bpf_prog *xdp_prog,
+	unsigned int *xdp_xmit
+)
+{
+	int err;
+
+	if(xdp_rx_batch.xmit_frames_used < 1)
+		return;
+
+	err = virtnet_xdp_xmit(dev,
+			xdp_rx_batch.xmit_frames_used,
+			&xdp_rx_batch.xmit_xdp_frames[0],
+			0);
+	if (unlikely(!err)) {
+		for (int k = 0; k < xdp_rx_batch.xmit_frames_used; k++) {
+			xdp_return_frame_rx_napi(xdp_rx_batch.xmit_xdp_frames[k]);
+		}
+		*xdp_xmit |= VIRTIO_XDP_TX;
+	} else if (unlikely(err < 0)) {
+		trace_xdp_exception(dev, xdp_prog, XDP_TX);
+		// failed to send a batch of packets, convert all TX
+		// action to drop
+		for (int k = 0; k < xdp_rx_batch.batch.size; k++) {
+			if (xdp_rx_batch.batch.actions[k] == XDP_TX)
+				xdp_rx_batch.batch.actions[k] = XDP_DROP;
+		}
+	} else {
+		*xdp_xmit |= VIRTIO_XDP_TX;
+	}
+}
+
 /* @brief: same as the receive_small with XDP program attached,
  * but XDP is called with a batch of packets
  * */
-static inline int __receive_small_packets_in_batch(struct virtnet_info *vi,
+static int __receive_small_packets_in_batch(struct virtnet_info *vi,
 		struct receive_queue *rq,
 		int budget,
 		unsigned int *xdp_xmit,
 		struct virtnet_rq_stats *stats,
 		struct bpf_prog *xdp_prog)
 {
-	int err = 0;
 	unsigned int len = 0;
 	int packets = 0;
 	void *buf = NULL;
 	void *ctx = NULL;
 
 	struct net_device *dev = vi->dev;
-
-	struct xdp_frame *xdpf;
 	struct xdp_buff *xdp_ptr;
 
 	// gather the information about location and size of packets we want to
@@ -3047,77 +3141,8 @@ err:
 
 	// batch apply this:
 	/* act = virtnet_xdp_handler(xdp_prog, &xdp, dev, xdp_xmit, stats); */
-	u32 act = bpf_prog_run(xdp_prog, &xdp_rx_batch.batch);
-
-	// Apply unwrap the action decide for each packet 
-	u64_stats_add(&stats->xdp_packets, packets);
-	xdp_rx_batch.xmit_frames_used = 0;
-	for (int k = 0; k < packets; k++) {
-		xdp_ptr = &xdp_rx_batch.batch.buffs[k];
-		act = xdp_rx_batch.batch.actions[k];
-		if (static_branch_unlikely(&bpf_master_redirect_enabled_key)) {
-			if (act == XDP_TX && netif_is_bond_slave(xdp_ptr->rxq->dev))
-				act = xdp_master_redirect(xdp_ptr);
-		}
-		switch(act) {
-			case XDP_PASS:
-				continue;
-			case XDP_TX:
-				u64_stats_inc(&stats->xdp_tx);
-				xdpf = xdp_convert_buff_to_frame(xdp_ptr);
-				if (unlikely(!xdpf)) {
-					netdev_dbg(dev, "convert buff to frame failed for xdp\n");
-					xdp_rx_batch.batch.actions[k] = XDP_DROP;
-					continue;
-				}
-				// keep track of frames we should transmit
-				u32 tmp_index = xdp_rx_batch.xmit_frames_used;
-				xdp_rx_batch.xmit_frames_used++;
-				xdp_rx_batch.xmit_xdp_frames[tmp_index] = xdpf;
-				continue;
-
-			case XDP_REDIRECT:
-				u64_stats_inc(&stats->xdp_redirects);
-				err = xdp_do_redirect(dev, xdp_ptr, xdp_prog);
-				if (err)
-					return XDP_DROP;
-
-				*xdp_xmit |= VIRTIO_XDP_REDIR;
-				continue;
-
-			default:
-				bpf_warn_invalid_xdp_action(dev, xdp_prog, act);
-				fallthrough;
-			case XDP_ABORTED:
-				trace_xdp_exception(dev, xdp_prog, act);
-				xdp_rx_batch.batch.actions[k] = XDP_DROP;
-			case XDP_DROP:
-				continue;
-		}
-	}
-
-	if (xdp_rx_batch.xmit_frames_used > 0) {
-		err = virtnet_xdp_xmit(dev,
-				xdp_rx_batch.xmit_frames_used,
-				&xdp_rx_batch.xmit_xdp_frames[0],
-				0);
-		if (unlikely(!err)) {
-			for (int k = 0; k < xdp_rx_batch.xmit_frames_used; k++) {
-				xdp_return_frame_rx_napi(xdp_rx_batch.xmit_xdp_frames[k]);
-			}
-			*xdp_xmit |= VIRTIO_XDP_TX;
-		} else if (unlikely(err < 0)) {
-			trace_xdp_exception(dev, xdp_prog, XDP_TX);
-			// failed to send a batch of packets, convert all TX
-			// action to drop
-			for (int k = 0; k < packets; k++) {
-				if (xdp_rx_batch.batch.actions[k] == XDP_TX)
-					xdp_rx_batch.batch.actions[k] = XDP_DROP;
-			}
-		} else {
-			*xdp_xmit |= VIRTIO_XDP_TX;
-		}
-	}
+	__xdp_batch_run(packets, dev, xdp_prog, stats, xdp_xmit);
+	__process_outstanding_xmit_frames(dev, xdp_prog, xdp_xmit);
 
 	// rest of the network stack works on a single packet so here we
 	// unbatch things
@@ -3156,6 +3181,239 @@ err:
 
 	return packets;
 }
+
+static int __receive_small_mergeable_packets_in_batch(struct virtnet_info *vi,
+		struct receive_queue *rq,
+		int budget,
+		unsigned int *xdp_xmit,
+		struct virtnet_rq_stats *stats,
+		struct bpf_prog *xdp_prog)
+{
+	unsigned int len = 0;
+	int packets = 0;
+	void *buf = NULL;
+	void *ctx = NULL;
+
+	struct net_device *dev = vi->dev;
+
+	// gather the information about location and size of packets we want to
+	// process in batch
+	for (int k = 0; k < budget; k++) {
+		// get a buffer out of the virtio queue
+		buf = virtnet_rq_get_buf(rq, &len, &ctx);
+		if (buf == NULL)
+			break;
+
+		// the packet is shorter than expected (an ethernet header)
+		if (unlikely(len < vi->hdr_len + ETH_HLEN)) {
+			pr_debug("%s: short packet %i\n", dev->name, len);
+			DEV_STATS_INC(dev, rx_length_errors);
+			virtnet_rq_free_buf(vi, rq, buf);
+			continue; // ignore
+		}
+
+		struct virtio_net_hdr_mrg_rxbuf *hdr = buf;
+		int num_buf = virtio16_to_cpu(vi->vdev, hdr->num_buffers);
+		struct page *page = virt_to_head_page(buf);
+		int offset = buf - page_address(page);
+		unsigned int truesize = mergeable_ctx_to_truesize(ctx);
+		unsigned int headroom = mergeable_ctx_to_headroom(ctx);
+		unsigned int tailroom = headroom ? sizeof(struct skb_shared_info) : 0;
+		unsigned int room = SKB_DATA_ALIGN(headroom + tailroom);
+
+		u64_stats_add(&stats->bytes, len - vi->hdr_len);
+
+		if (unlikely(len > truesize - room)) {
+			pr_debug("%s: rx error: len %u exceeds truesize %lu\n",
+					dev->name, len, (unsigned long)(truesize - room));
+			DEV_STATS_INC(dev, rx_length_errors);
+
+			put_page(page);
+			mergeable_buf_free(rq, num_buf, dev, stats);
+			u64_stats_inc(&stats->drops);
+			continue;
+		}
+
+		unsigned int xdp_frags_truesz = 0;
+		unsigned int frame_sz;
+		struct xdp_buff *xdp_ptr = &xdp_rx_batch.batch.buffs[packets];
+		void *data;
+		int err;
+
+		data = mergeable_xdp_get_buf(vi, rq, xdp_prog, ctx, &frame_sz, &num_buf, &page, offset, &len, hdr);
+		if (unlikely(!data)) {
+			put_page(page);
+			mergeable_buf_free(rq, num_buf, dev, stats);
+			u64_stats_inc(&stats->xdp_drops);
+			u64_stats_inc(&stats->drops);
+			continue;
+		}
+		err = virtnet_build_xdp_buff_mrg(dev, vi, rq, xdp_ptr, data, len, frame_sz, &num_buf, &xdp_frags_truesz, stats);
+		if (unlikely(err)) {
+			put_page(page);
+			mergeable_buf_free(rq, num_buf, dev, stats);
+			u64_stats_inc(&stats->xdp_drops);
+			u64_stats_inc(&stats->drops);
+			continue;
+		}
+
+		xdp_rx_batch.buf[packets]     = buf;
+		xdp_rx_batch.page[packets]    = page;
+		xdp_rx_batch.buf_len[packets] = len;
+		xdp_rx_batch.num_buf[packets] = num_buf;
+		xdp_rx_batch.flags[packets]   = ((struct virtio_net_common_hdr *)buf)->hdr.flags;
+		xdp_rx_batch.batch.actions[packets] = XDP_ABORTED;
+		packets++;
+	}
+	xdp_rx_batch.batch.size = packets;
+
+	__xdp_batch_run(packets, dev, xdp_prog, stats, xdp_xmit);
+	__process_outstanding_xmit_frames(dev, xdp_prog, xdp_xmit);
+
+	for (int k = 0; k < packets; k ++) {
+		u32 act = xdp_rx_batch.batch.actions[k];
+		struct xdp_buff *xdp_ptr = &xdp_rx_batch.batch.buffs[k];
+		if (act == XDP_TX || act == XDP_REDIRECT)
+			continue;
+		if (act != XDP_PASS) {
+			put_xdp_frags(&xdp_rx_batch.batch.buffs[k]);
+			put_page(xdp_rx_batch.page[k]);
+			mergeable_buf_free(rq, xdp_rx_batch.num_buf[k], dev, stats);
+
+			u64_stats_inc(&stats->xdp_drops);
+			u64_stats_inc(&stats->drops);
+			continue;
+		}
+		// XDP_PASS
+		struct sk_buff *head_skb = build_skb_from_xdp_buff(dev, vi, xdp_ptr, xdp_ptr->frame_sz);
+		if (unlikely(!head_skb)) {
+			put_xdp_frags(xdp_ptr);
+			put_page(xdp_rx_batch.page[k]);
+			mergeable_buf_free(rq, xdp_rx_batch.num_buf[k], dev, stats);
+
+			u64_stats_inc(&stats->xdp_drops);
+			u64_stats_inc(&stats->drops);
+			continue;
+		}
+		u8 flags = xdp_rx_batch.flags[k];
+		virtnet_receive_done(vi, rq, head_skb, flags);
+	}
+	return packets;
+}
+
+static int __receive_big_mergeable_packets_in_batch(struct virtnet_info *vi,
+		struct receive_queue *rq,
+		int budget,
+		unsigned int *xdp_xmit,
+		struct virtnet_rq_stats *stats,
+		struct bpf_prog *xdp_prog)
+{
+	unsigned int len;
+	unsigned int packets;
+	void *buf;
+	struct net_device *dev = vi->dev;
+	for (int k = 0; k < budget; k++) {
+		buf = virtqueue_get_buf(rq->vq, &len);
+		// check if there are more buffers in the queue
+		if (buf == NULL)
+			break;
+
+		// check if buffer fits at least an ethernet header
+		if (unlikely(len < vi->hdr_len + ETH_HLEN)) {
+			pr_debug("%s: short packet %i\n", dev->name, len);
+			DEV_STATS_INC(dev, rx_length_errors);
+			virtnet_rq_free_buf(vi, rq, buf);
+			continue; // ignore this packet
+		}
+
+		struct virtio_net_hdr_mrg_rxbuf *hdr = buf;
+		int num_buf = virtio16_to_cpu(vi->vdev, hdr->num_buffers);
+		struct page *page = virt_to_head_page(buf);
+		int offset = buf - page_address(page);
+		unsigned int truesize = 0;
+		unsigned int headroom = 0;
+		unsigned int tailroom = headroom ? sizeof(struct skb_shared_info) : 0;
+		unsigned int room = SKB_DATA_ALIGN(headroom + tailroom);
+
+		u64_stats_add(&stats->bytes, len - vi->hdr_len);
+
+		if (unlikely(len > truesize - room)) {
+			pr_debug("%s: rx error: len %u exceeds truesize %lu\n",
+					dev->name, len, (unsigned long)(truesize - room));
+			DEV_STATS_INC(dev, rx_length_errors);
+
+			put_page(page);
+			mergeable_buf_free(rq, num_buf, dev, stats);
+			u64_stats_inc(&stats->drops);
+			continue;
+		}
+
+		unsigned int xdp_frags_truesz = 0;
+		unsigned int frame_sz;
+		struct xdp_buff *xdp_ptr = &xdp_rx_batch.batch.buffs[packets];
+		void *data;
+		int err;
+
+		data = mergeable_xdp_get_buf(vi, rq, xdp_prog, NULL, &frame_sz, &num_buf, &page, offset, &len, hdr);
+		if (unlikely(!data)) {
+			put_page(page);
+			mergeable_buf_free(rq, num_buf, dev, stats);
+			u64_stats_inc(&stats->xdp_drops);
+			u64_stats_inc(&stats->drops);
+			continue;
+		}
+		err = virtnet_build_xdp_buff_mrg(dev, vi, rq, xdp_ptr, data, len, frame_sz, &num_buf, &xdp_frags_truesz, stats);
+		if (unlikely(err)) {
+			put_page(page);
+			mergeable_buf_free(rq, num_buf, dev, stats);
+			u64_stats_inc(&stats->xdp_drops);
+			u64_stats_inc(&stats->drops);
+			continue;
+		}
+
+		xdp_rx_batch.buf[packets]     = buf;
+		xdp_rx_batch.page[packets]    = page;
+		xdp_rx_batch.buf_len[packets] = len;
+		xdp_rx_batch.num_buf[packets] = num_buf;
+		xdp_rx_batch.flags[packets]   = ((struct virtio_net_common_hdr *)buf)->hdr.flags;
+		xdp_rx_batch.batch.actions[packets] = XDP_ABORTED;
+		packets++;
+	}
+	xdp_rx_batch.batch.size = packets;
+
+	__xdp_batch_run(packets, dev, xdp_prog, stats, xdp_xmit);
+	__process_outstanding_xmit_frames(dev, xdp_prog, xdp_xmit);
+
+	for (int k = 0; k < packets; k ++) {
+		u32 act = xdp_rx_batch.batch.actions[k];
+		struct xdp_buff *xdp_ptr = &xdp_rx_batch.batch.buffs[k];
+		if (act == XDP_TX || act == XDP_REDIRECT)
+			continue;
+		if (act != XDP_PASS) {
+			put_xdp_frags(&xdp_rx_batch.batch.buffs[k]);
+			put_page(xdp_rx_batch.page[k]);
+			mergeable_buf_free(rq, xdp_rx_batch.num_buf[k], dev, stats);
+
+			u64_stats_inc(&stats->xdp_drops);
+			u64_stats_inc(&stats->drops);
+			continue;
+		}
+		// XDP_PASS
+		struct sk_buff *head_skb = build_skb_from_xdp_buff(dev, vi, xdp_ptr, xdp_ptr->frame_sz);
+		if (unlikely(!head_skb)) {
+			put_xdp_frags(xdp_ptr);
+			put_page(xdp_rx_batch.page[k]);
+			mergeable_buf_free(rq, xdp_rx_batch.num_buf[k], dev, stats);
+
+			u64_stats_inc(&stats->xdp_drops);
+			u64_stats_inc(&stats->drops);
+			continue;
+		}
+		u8 flags = xdp_rx_batch.flags[k];
+		virtnet_receive_done(vi, rq, head_skb, flags);
+	}
+	return packets;
+}
 #endif
 
 
@@ -3168,22 +3426,37 @@ static int virtnet_receive_packets(struct virtnet_info *vi,
 	unsigned int len;
 	int packets = 0;
 	void *buf;
+#ifdef CONFIG_XDP_BATCHING
+	struct bpf_prog *batch_xdp_prog = NULL;
+	if (vi->xdp_enabled) {
+		rcu_read_lock();
+		batch_xdp_prog = rcu_dereference(rq->xdp_prog);
+		if (batch_xdp_prog != NULL && !batch_xdp_prog->batching_aware) {
+			// this program is not batch aware. it will not go
+			// through our code path
+			batch_xdp_prog = NULL;
+			rcu_read_unlock();
+		}
+	}
+#endif
 
 	if (!vi->big_packets || vi->mergeable_rx_bufs) {
 #ifdef CONFIG_XDP_BATCHING
 		// batching only in small packet mode
-		if (!vi->mergeable_rx_bufs) {
-			// do not batch if there is no XDP program
-			if (vi->xdp_enabled) {
-				struct bpf_prog *xdp_prog = NULL;
-				rcu_read_lock();
-				xdp_prog = rcu_dereference(rq->xdp_prog);
-				if (xdp_prog != NULL && xdp_prog->batching_aware) {
-					packets = __receive_small_packets_in_batch(vi, rq, budget, xdp_xmit, stats, xdp_prog);
-					rcu_read_unlock();
-					return packets;
-				}
+		if (batch_xdp_prog != NULL) {
+			if (vi->mergeable_rx_bufs) {
+				packets = __receive_small_mergeable_packets_in_batch(vi, rq, budget, xdp_xmit, stats, batch_xdp_prog);
 				rcu_read_unlock();
+				return packets;
+				// we have not handled this path. The program
+				// is batching aware so we can not fallthrough
+				// to the normal path
+				// printk("why do we have small meargable packets?\n");
+				// BUG_ON(true);
+			} else {
+				packets = __receive_small_packets_in_batch(vi, rq, budget, xdp_xmit, stats, batch_xdp_prog);
+				rcu_read_unlock();
+				return packets;
 			}
 		}
 		// otherwise do whatever was done before ...
@@ -3195,6 +3468,20 @@ static int virtnet_receive_packets(struct virtnet_info *vi,
 			packets++;
 		}
 	} else {
+#ifdef CONFIG_XDP_BATCHING
+		if (batch_xdp_prog != NULL) {
+			if (!vi->mergeable_rx_bufs) {
+				rcu_read_unlock();
+				printk("the big packet is not mergeable!\n");
+				BUG_ON(true);
+			} else {
+				packets = __receive_big_mergeable_packets_in_batch(vi, rq, budget, xdp_xmit, stats, batch_xdp_prog);
+				rcu_read_unlock();
+				return packets;
+			}
+		}
+		// otherwise do whatever was done before ...
+#endif
 		while (packets < budget &&
 		       (buf = virtqueue_get_buf(rq->vq, &len)) != NULL) {
 			receive_buf(vi, rq, buf, len, NULL, xdp_xmit, stats);
@@ -3202,7 +3489,10 @@ static int virtnet_receive_packets(struct virtnet_info *vi,
 		}
 	}
 
-	printk("well, our batching code did not ran!\n");
+	/* printk("well, our batching code did not ran!\n"); */
+	/* printk("is big: %d\n", vi->big_packets); */
+	/* printk("is mergeable: %d\n", vi->mergeable_rx_bufs); */
+	/* printk("xdp enabled: %d\n", vi->xdp_enabled); */
 	return packets;
 }
 
