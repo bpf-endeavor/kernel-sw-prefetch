@@ -7518,10 +7518,16 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 			return -EACCES;
 		}
 
+		/* Farbod: skip checking the offset into the context for our
+		 * batching API. Is it safe? I don't care at the moment */
+		if (env->prog->batching_aware)
+			goto skip_ptr_off_reg_check;
+
 		err = check_ptr_off_reg(env, reg, regno);
 		if (err < 0)
 			return err;
 
+skip_ptr_off_reg_check:
 		err = check_ctx_access(env, insn_idx, off, size, t, &info);
 		if (err)
 			verbose_linfo(env, insn_idx, "; ");
@@ -9296,6 +9302,13 @@ static int check_func_arg_reg_off(struct bpf_verifier_env *env,
 		}
 		return __check_ptr_off_reg(env, reg, regno, false);
 	}
+
+	/* Farbod: let's allow both fixed and variable offset into the context
+	 * for out batched programs */
+	if (type == PTR_TO_CTX && env->prog->batching_aware) {
+		return 0;
+	}
+	/* ...others are handled as before */
 
 	switch (type) {
 	/* Pointer types where both fixed and variable offset is explicitly allowed: */

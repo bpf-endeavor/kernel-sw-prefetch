@@ -2934,6 +2934,7 @@ static inline void __xdp_batch_run(
 		unsigned int *xdp_xmit
 )
 {
+	/* printk("running a batch with %d packets\n", xdp_rx_batch.batch.size); */
 	u32 act = bpf_prog_run(xdp_prog, &xdp_rx_batch.batch);
 
 	// Apply unwrap the action decide for each packet 
@@ -3137,10 +3138,8 @@ err:
 		// the current packet was not good :). ignore it
 	}
 	xdp_rx_batch.batch.size = packets; // set the size of the batch
-	printk("batch sz: %d\n", packets);
 
 	// batch apply this:
-	/* act = virtnet_xdp_handler(xdp_prog, &xdp, dev, xdp_xmit, stats); */
 	__xdp_batch_run(packets, dev, xdp_prog, stats, xdp_xmit);
 	__process_outstanding_xmit_frames(dev, xdp_prog, xdp_xmit);
 

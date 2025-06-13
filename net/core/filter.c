@@ -10347,18 +10347,27 @@ static u32 xdp_batch_convert_ctx_access(enum bpf_access_type type,
 
 	// check if we are accessing the actions array
 	array_begin_off = offsetof(struct xdp_batch_md, actions);
-	array_size = sizeof(unsigned int) * XDP_MAX_BATCH_SIZE;
-	if (off >= array_begin_off && off < array_begin_off + array_size) {
-		u32 index = (off - array_begin_off) / sizeof(u32);
-		u32 remaining = (off - array_begin_off) - (index * sizeof(u32));
+	s16 array_end_off = array_begin_off + (sizeof(unsigned int) * XDP_MAX_BATCH_SIZE);
+	if (off >= array_begin_off && off < array_end_off) {
+		unsigned int index = (off - array_begin_off) / sizeof(unsigned int);
+		unsigned int remaining = (off - array_begin_off) - (index * sizeof(unsigned int));
 		// actions do not have subfields, the access shuolud be aligned
 		if (remaining == 0) {
-			s16 indexed_object = \
-				offsetof(struct xdp_batch_buff, actions) +
-				(index * sizeof(u32));
-			// action is u32 its size is BPF_W
-			*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->src_reg,
-					indexed_object);
+			short indexed_object = offsetof(struct xdp_batch_buff, actions) + (index * sizeof(unsigned int));
+			if (type == BPF_READ) {
+				// we are reading a value
+				// action is u32 its size is BPF_W
+				*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->src_reg, indexed_object);
+			} else if (type == BPF_WRITE) {
+				// we are writing a value
+				*insn++ = BPF_STX_MEM(BPF_W, si->dst_reg, si->src_reg, indexed_object);
+			} else {
+				printk("unexpected! are we reading, writing or what?!");
+				BUG_ON(true);
+			}
+		} else {
+			printk("access to the array is not aligned to its type size");
+			BUG_ON(true);
 		}
 		return insn - insn_buf;
 	}
