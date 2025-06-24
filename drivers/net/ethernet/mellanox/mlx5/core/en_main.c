@@ -1085,7 +1085,7 @@ int mlx5e_create_rq(struct mlx5e_rq *rq, struct mlx5e_rq_param *param, u16 q_cou
 
 #ifdef CONFIG_XDP_BATCHING
 	/* allocate the xdp_recv_batch structure */
-	rq->xdp_rx_batch = kzalloc(sizoef(struct mlx5_xdp_recv_batch), GFP_KERNEL);
+	rq->xdp_rx_batch = kzalloc(sizeof(struct mlx5_xdp_recv_batch), GFP_KERNEL);
 	if (rq->xdp_rx_batch == NULL)
 		return -ENOMEM;
 #endif

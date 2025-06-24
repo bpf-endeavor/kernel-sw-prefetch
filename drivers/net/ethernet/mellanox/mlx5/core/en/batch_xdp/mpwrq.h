@@ -9,6 +9,8 @@
 static void fs_finilize_rx_cqe_mpwrq(struct mlx5e_rq *rq, int b_index,
 		struct sk_buff *skb)
 {
+	struct mlx5e_rx_wqe_ll *wqe;
+	struct mlx5_wq_ll *wq;
 	struct mlx5_cqe64 *cqe = QUEUE_GET_XDP_STATE(rq, cqe, b_index);
 	struct mlx5e_mpw_info *wi = QUEUE_GET_XDP_STATE(rq, wi_mpw, b_index);
 	u32 cqe_bcnt = QUEUE_GET_XDP_STATE(rq, cqe_bcnt, b_index);
@@ -33,7 +35,7 @@ mpwrq_cqe_out:
 		return;
 
 	wq  = &rq->mpwqe.wq;
-	wqe = mlx5_wq_ll_get_wqe(wq, wqe_id);
+	wqe = mlx5_wq_ll_get_wqe(wq, be16_to_cpu(cqe->wqe_id));
 	mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index);
 }
 
@@ -49,8 +51,8 @@ struct sk_buff *fs_create_skb_mpwrq_linear(struct mlx5e_rq *rq, u32 index)
 	frag_page = &wi->alloc_units.frag_pages[page_idx];
 
 	if (act != XDP_PASS) {
-		u8 flags = QUEUE_GET_XDP_STATE(rq, flags, index);
-		if (__test_and_clear_bit(MLX5E_RQ_FLAG_XDP_XMIT, flags))
+		long unsigned int *flags_ptr = (long unsigned int *)&QUEUE_GET_XDP_STATE(rq, flags, index);
+		if (__test_and_clear_bit(MLX5E_RQ_FLAG_XDP_XMIT, flags_ptr))
 			frag_page->frags++;
 		return NULL; /* page/packet was consumed by XDP */
 	}
@@ -64,6 +66,7 @@ struct sk_buff *fs_create_skb_mpwrq_linear(struct mlx5e_rq *rq, u32 index)
 	u32 frag_size = MLX5_SKB_FRAG_SZ(rx_headroom + cqe_bcnt);
 	u32 head_offset = QUEUE_GET_XDP_STATE(rq, head_offset, index);
 	void *va = page_address(frag_page->page) + head_offset;
+	struct sk_buff *skb;
 	skb = mlx5e_build_linear_skb(rq, va, frag_size, rx_headroom, cqe_bcnt,
 			metasize);
 	if (unlikely(!skb))
@@ -92,8 +95,8 @@ struct sk_buff *fs_create_skb_mpwrq_nolinear(struct mlx5e_rq *rq, u32 index)
 	struct mlx5e_frag_page *frag_page = head_page + count_page;
 
 	if (act != XDP_PASS) {
-		u8 flags = QUEUE_GET_XDP_STATE(rq, flags, index);
-		if (__test_and_clear_bit(MLX5E_RQ_FLAG_XDP_XMIT, flags)) {
+		long unsigned int *flags_ptr = (long unsigned int *)&QUEUE_GET_XDP_STATE(rq, flags, index);
+		if (__test_and_clear_bit(MLX5E_RQ_FLAG_XDP_XMIT, flags_ptr)) {
 			struct mlx5e_frag_page *pfp;
 
 			for (pfp = head_page; pfp < frag_page; pfp++)
@@ -105,8 +108,9 @@ struct sk_buff *fs_create_skb_mpwrq_nolinear(struct mlx5e_rq *rq, u32 index)
 		return NULL; /* page/packet was consumed by XDP */
 	}
 
+	struct sk_buff *skb;
 	skb = mlx5e_build_linear_skb(rq, xdp->data_hard_start,
-			linear_frame_sz,
+			xdp->frame_sz,
 			xdp->data - xdp->data_hard_start, 0,
 			xdp->data - xdp->data_meta);
 	if (unlikely(!skb)) {
@@ -151,26 +155,30 @@ void fs_batch_desc_mpwrq_nonlinear(struct mlx5e_rq *rq,
 	QUEUE_GET_XDP_STATE(rq, wi_mpw, pkt_index) = wi;
 
 	struct mlx5e_frag_page *frag_page = &wi->alloc_units.frag_pages[page_idx];
-	struct mlx5e_frag_page *head_page = frag_page;
 	u32 frag_offset    = head_offset;
 	u32 byte_cnt       = cqe_bcnt;
 	struct skb_shared_info *sinfo;
 	unsigned int truesize = 0;
-	struct bpf_prog *prog;
-	struct sk_buff *skb;
 	u32 linear_frame_sz;
 	u16 linear_data_len;
 	u16 linear_hr;
 	void *va;
 
-	/* area for bpf_xdp_[store|load]_bytes */
-	// net_prefetchw(page_address(frag_page->page) + frag_offset);
 	if (unlikely(mlx5e_page_alloc_fragmented(rq, &wi->linear_page))) {
 		rq->stats->buff_alloc_err++;
-		return NULL;
+
+		if (likely(wi->consumed_strides < rq->mpwqe.num_strides))
+			return;
+
+		struct mlx5e_rx_wqe_ll *wqe;
+		struct mlx5_wq_ll *wq;
+		wq  = &rq->mpwqe.wq;
+		wqe = mlx5_wq_ll_get_wqe(wq, be16_to_cpu(cqe->wqe_id));
+		mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index);
+		return;
 	}
+
 	va = page_address(wi->linear_page.page);
-	net_prefetchw(va); /* xdp_frame data area */
 	linear_hr = XDP_PACKET_HEADROOM;
 	linear_data_len = 0;
 	linear_frame_sz = MLX5_SKB_FRAG_SZ(linear_hr + MLX5E_RX_MAX_HEAD);
@@ -179,7 +187,7 @@ void fs_batch_desc_mpwrq_nonlinear(struct mlx5e_rq *rq,
 	xdp_init_buff(xdp, linear_frame_sz, &rq->xdp_rxq);
 	xdp_prepare_buff(xdp, va, linear_hr, linear_data_len, true);
 
-	sinfo = xdp_get_shared_info_from_buff(&mxbuf.xdp);
+	sinfo = xdp_get_shared_info_from_buff(xdp);
 
 	u32 k = 0;
 	while (byte_cnt) {
@@ -191,7 +199,7 @@ void fs_batch_desc_mpwrq_nonlinear(struct mlx5e_rq *rq,
 		else
 			truesize += ALIGN(pg_consumed_bytes, BIT(rq->mpwqe.log_stride_sz));
 
-		mlx5e_add_skb_shared_info_frag(rq, sinfo, &mxbuf.xdp, frag_page, frag_offset,
+		mlx5e_add_skb_shared_info_frag(rq, sinfo, xdp, frag_page, frag_offset,
 					       pg_consumed_bytes);
 		byte_cnt -= pg_consumed_bytes;
 		frag_offset = 0;
@@ -201,6 +209,8 @@ void fs_batch_desc_mpwrq_nonlinear(struct mlx5e_rq *rq,
 
 	QUEUE_GET_XDP_STATE(rq, count_page, pkt_index) = k;
 	QUEUE_GET_XDP_STATE(rq, truesize, pkt_index) = truesize;
+	QUEUE_GET_XDP_ACT(rq, pkt_index) = XDP_ABORTED;
+	rq->xdp_rx_batch->batch.size++;
 }
 
 static
@@ -216,9 +226,6 @@ void fs_batch_desc_mpwrq_linear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *wi,
 
 	struct mlx5e_frag_page *frag_page = &wi->alloc_units.frag_pages[page_idx];
 	u16 rx_headroom = rq->buff.headroom;
-	struct bpf_prog *prog;
-	struct sk_buff *skb;
-	u32 metasize = 0;
 	void *va, *data;
 	dma_addr_t addr;
 	u32 frag_size;
@@ -226,7 +233,16 @@ void fs_batch_desc_mpwrq_linear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *wi,
 	/* Check packet size. Note LRO doesn't use linear SKB */
 	if (unlikely(cqe_bcnt > rq->hw_mtu)) {
 		rq->stats->oversize_pkts_sw_drop++;
-		return NULL;
+
+		if (likely(wi->consumed_strides < rq->mpwqe.num_strides))
+			return;
+
+		struct mlx5e_rx_wqe_ll *wqe;
+		struct mlx5_wq_ll *wq;
+		wq  = &rq->mpwqe.wq;
+		wqe = mlx5_wq_ll_get_wqe(wq, be16_to_cpu(cqe->wqe_id));
+		mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index);
+		return;
 	}
 
 	va             = page_address(frag_page->page) + head_offset;
@@ -236,18 +252,14 @@ void fs_batch_desc_mpwrq_linear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *wi,
 	addr = page_pool_get_dma_addr(frag_page->page);
 	dma_sync_single_range_for_cpu(rq->pdev, addr, head_offset,
 				      frag_size, rq->buff.map_dir);
-	// net_prefetch(data);
-
-	// TODO: continue working from here
-
-	// net_prefetchw(va); /* xdp_frame data area */
-	mlx5e_fill_mxbuf(rq, cqe, va, rx_headroom, rq->buff.frame0_sz,
-			 cqe_bcnt, &mxbuf);
 
 	struct xdp_buff *xdp = QUEUE_GET_XDP_BUFF(rq, pkt_index);
 	u32 frame_sz = rq->buff.frame0_sz;
 	xdp_init_buff(xdp, frame_sz, &rq->xdp_rxq);
 	xdp_prepare_buff(xdp, va, rx_headroom, cqe_bcnt, true);
+
+	QUEUE_GET_XDP_ACT(rq, pkt_index) = XDP_ABORTED;
+	rq->xdp_rx_batch->batch.size++;
 }
 
 static
@@ -262,7 +274,6 @@ void fs_handle_rx_cqe_mpwrq(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
 	u32 page_idx       = wqe_offset >> rq->mpwqe.page_shift;
 	struct mlx5e_rx_wqe_ll *wqe;
 	struct mlx5_wq_ll *wq;
-	struct sk_buff *skb;
 	u16 cqe_bcnt;
 
 	wi->consumed_strides += cstrides;
@@ -297,7 +308,7 @@ void fs_handle_rx_cqe_mpwrq(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
 
 	u32 pkt_index = rq->xdp_rx_batch->batch.size;
 	QUEUE_GET_XDP_STATE(rq, cqe, pkt_index) = cqe;
-	QUEUE_GET_XDP_STATE(rq, cqe, pkt_index) = cqe_bcnt;
+	QUEUE_GET_XDP_STATE(rq, cqe_bcnt, pkt_index) = cqe_bcnt;
 	QUEUE_GET_XDP_STATE(rq, page_index, pkt_index) = page_idx;
 	QUEUE_GET_XDP_STATE(rq, head_offset, pkt_index) = head_offset;
 

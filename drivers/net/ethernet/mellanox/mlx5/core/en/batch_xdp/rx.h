@@ -8,6 +8,14 @@
  * notes (mostly to myself) about what I've learnt and want to do in this
  * implementation.
  *
+ * == Disclaimer ==
+ * What is wrong with my approach? I've  tried to apply changes to the driver
+ * without fully understanding the intricacies of its communication protocol
+ * with the hardware. I applied some general functions on the source code,
+ * breaking and reorganizing the order of stuff. It does not grauntee the
+ * correctnes. Making this work will be painful. I have commited time and
+ * energy. Hopefully I won't regret it.
+ *
  * == Execution Paths ==
  * The MLX5e original path is:
  *     poll_rx_cq -> process_basic/enhanced_cqe -> hdnle_rx_cqe ->
@@ -15,7 +23,7 @@
  *
  * The idea is to change it as below when we have a batch aware xdp program:
  *     poll_rx_cq -> process_basic/enhanced_cqe -> handle_rx_cqe ->
- *                          batch_desc -> run_xdp_batch_proc -> create_skb
+ *       batch_desc -> run_xdp_batch_proc -> create_skb -> finalize processing
  *
  * There're multiple implementation of these functions based on flags and
  * enabled features. Descriptors we receave are either ``basic'' or ``enhanced''.
@@ -47,20 +55,26 @@
  * */
 
 /* These macros help with packig/unpackig state of each packet in the batch */
-#define QUEUE_GET_XDP_STATE(rq, name, i) rq->xdp_rx_batch.S[i].name
-#define QUEUE_GET_XDP_BUFF(rq, i) &rq->batch->buffs[i]
-#define QUEUE_GET_XDP_ACT(rq, i) &rq->batch->actions[i]
+#define QUEUE_GET_XDP_STATE(rq, name, i) rq->xdp_rx_batch->S[i].name
+#define QUEUE_GET_XDP_BUFF(rq, i) &rq->xdp_rx_batch->batch.buffs[i]
+#define QUEUE_GET_XDP_ACT(rq, i) rq->xdp_rx_batch->batch.actions[i]
 
 // move the MPWRQ CQE handling to another file to avoid confusion
 #include "en/batch_xdp/mpwrq.h"
 // move the normal CQE handling to another file to avoid confusion
 #include "en/batch_xdp/cqe.h"
 
+static inline __attribute__((always_inline))
+void clear_the_batch(struct mlx5e_rq *rq)
+{
+	rq->xdp_rx_batch->batch.size = 0;
+}
+
 static
 void fs_indirect_call_finalize_rx_cqe(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq)
 {
-	u32 sz = rq->batch.size;
-	struct skb_buff *skb;
+	u32 sz = rq->xdp_rx_batch->batch.size;
+	struct sk_buff *skb;
 
 	if (rq->handle_rx_cqe == mlx5e_handle_rx_cqe_mpwrq) {
 		for (int i = 0; i < sz; i++) {
@@ -90,6 +104,9 @@ void fs_indirect_call_finalize_rx_cqe(struct mlx5e_rq *rq, struct mlx5_cqwq *cqw
 		printk("XDP batch aware processing: unexpected rx handler, finalize\n");
 		BUG_ON (true);
 	}
+
+	// It is important to reset the number of descriptors in the batch
+	clear_the_batch(rq);
 }
 
 /* Check which function was being called before and select the
@@ -185,8 +202,9 @@ static inline u32 fs_mlx5e_decompress_cqes_cont(struct mlx5e_rq *rq,
 	return cqe_count;
 }
 
-static inline u32 fs_mlx5e_decompress_cqes_start(struct mlx5e_rq *rq,
-					      struct mlx5_cqwq *wq, int budget_rem)
+static inline
+u32 fs_mlx5e_decompress_cqes_start(struct mlx5e_rq *rq, struct mlx5_cqwq *wq,
+		int budget_rem)
 {
 	struct mlx5e_cq_decomp *cqd = &rq->cqd;
 	u32 cc = wq->cc;
@@ -195,14 +213,15 @@ static inline u32 fs_mlx5e_decompress_cqes_start(struct mlx5e_rq *rq,
 	mlx5e_read_mini_arr_slot(wq, cqd, cc + 1);
 	mlx5e_decompress_cqe(rq, wq, cc);
 
-	fs_indirect_call_handle_rx_cqe(rq, &cqd->title)
+	fs_indirect_call_handle_rx_cqe(rq, &cqd->title);
 	cqd->mini_arr_idx++;
 
 	return fs_mlx5e_decompress_cqes_cont(rq, wq, 1, budget_rem);
 }
 
-static int process_basic_cqe_comp(struct mlx5e_rq *rq,
-					      struct mlx5_cqwq *cqwq, int budget_rem)
+static
+int process_basic_cqe_comp(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
+		int budget_rem)
 {
 	struct mlx5_cqe64 *cqe;
 	int work_done = 0;
@@ -259,12 +278,12 @@ static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 		// prefetch the packets
 		struct xdp_batch_buff *batch = &rq->xdp_rx_batch->batch;
 		for (int i = 0; i < batch->size; i++) {
-			net_prefetch(batch->buffs[i]->data);
-			net_prefetch(batch->buffs[i]->data_hard_start);
+			net_prefetch(batch->buffs[i].data);
+			net_prefetch(batch->buffs[i].data_hard_start);
 		}
 
 		// run the batch aware XDP program
-		bpf_prog_run(xdp_batch_aware_prog, &rq->xdp_rx_batch->batch);
+		bpf_prog_run(prog, batch);
 
 		// create the SKBs and pass packets to network stack (or not if XDP has
 		// consumed it)

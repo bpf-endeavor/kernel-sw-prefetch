@@ -4,14 +4,19 @@
 #ifdef CONFIG_XDP_BATCHING
 
 static inline __attribute__((always_inline))
-void fs_finilize_rx_cqe(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe,
-		struct skb_buff *skb)
+void fs_finilize_rx_cqe(struct mlx5e_rq *rq, int b_index,
+		struct sk_buff *skb)
 {
+	struct mlx5_cqe64 *cqe = QUEUE_GET_XDP_STATE(rq, cqe, b_index);
+	struct mlx5e_wqe_frag_info *wi = QUEUE_GET_XDP_STATE(rq, wi_wqe, b_index);
+	u16 cqe_bcnt = QUEUE_GET_XDP_STATE(rq, cqe_bcnt, b_index);
+	struct mlx5e_frag_page *frag_page = wi->frag_page;
+
 	if (!skb) {
 		/* probably for XDP */
-		u8 flags = QUEUE_GET_XDP_STATE(rq, falgs, pkt_index);
-		if (__test_and_clear_bit(MLX5E_RQ_FLAG_XDP_XMIT, rq->flags))
-			wi->frag_page->frags++;
+		 long unsigned int *flags_ptr = (long unsigned int *)&QUEUE_GET_XDP_STATE(rq, flags, b_index);
+		if (__test_and_clear_bit(MLX5E_RQ_FLAG_XDP_XMIT, flags_ptr))
+			frag_page->frags++;
 		goto wq_cyc_pop;
 	}
 
@@ -26,20 +31,21 @@ void fs_finilize_rx_cqe(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe,
 	napi_gro_receive(rq->cq.napi, skb);
 
 wq_cyc_pop:
+	struct mlx5_wq_cyc *wq = &rq->wqe.wq;
 	mlx5_wq_cyc_pop(wq);
 }
 
 static inline __attribute__((always_inline))
-struct sk_buff *fs_create_skb_linear(struct mlxe_rq *rq, u32 index)
+struct sk_buff *fs_create_skb_linear(struct mlx5e_rq *rq, u32 b_index)
 {
 	struct sk_buff *skb = NULL;
-	struct xdp_buff *xdp = QUEUE_GET_XDP_BUFF(rq, index);
+	struct xdp_buff *xdp = QUEUE_GET_XDP_BUFF(rq, b_index);
 	u16 rx_headroom =xdp->data - xdp->data_hard_start;
 	u32 metasize = xdp->data - xdp->data_meta;
 	u16 cqe_bcnt = xdp->data_end - xdp->data;
 	void *va = xdp->data_hard_start;
 
-	frag_size = MLX5_SKB_FRAG_SZ(rx_headroom + cqe_bcnt);
+	u32 frag_size = MLX5_SKB_FRAG_SZ(rx_headroom + cqe_bcnt);
 	skb = mlx5e_build_linear_skb(rq, va, frag_size, rx_headroom, cqe_bcnt,
 			metasize);
 	if (unlikely(!skb))
@@ -47,26 +53,27 @@ struct sk_buff *fs_create_skb_linear(struct mlxe_rq *rq, u32 index)
 
 	/* queue up for recycling/reuse */
 	skb_mark_for_recycle(skb);
+	struct mlx5e_wqe_frag_info *wi = QUEUE_GET_XDP_STATE(rq, wi_wqe, b_index);
+	struct mlx5e_frag_page *frag_page = wi->frag_page;
 	frag_page->frags++;
 
 	return skb;
 }
 
 static inline __attribute__((always_inline))
-struct sk_buff *fs_create_skb_nonlinear(struct mlxe_rq *rq, u32 index)
+struct sk_buff *fs_create_skb_nonlinear(struct mlx5e_rq *rq, u32 b_index)
 {
 	// unpack some state
-	u32 act = rq->batch.actions[index];
-	u8 flags = QUEUE_GET_XDP_STATE(rq, flags, index);
+	u32 act = QUEUE_GET_XDP_ACT(rq, b_index);
 	struct mlx5e_wqe_frag_info *head_wi, *wi;
-	wi = QUEUE_GET_XDP_STATE(rq, wi_wqe, index);
-	head_wi = QUEUE_GET_XDP_STATE(rq, head_wi, index);
-	struct xdp_buff *xdp = QUEUE_GET_XDP_BUFF(rq, index);
+	wi = QUEUE_GET_XDP_STATE(rq, wi_wqe, b_index);
+	head_wi = QUEUE_GET_XDP_STATE(rq, head_wi, b_index);
+	struct xdp_buff *xdp = QUEUE_GET_XDP_BUFF(rq, b_index);
 
 	if (act != XDP_PASS) {
-		if (__test_and_clear_bit(MLX5E_RQ_FLAG_XDP_XMIT, rq->flags)) {
+		long unsigned int *flags_ptr = (long unsigned int *)&QUEUE_GET_XDP_STATE(rq, flags, b_index);
+		if (__test_and_clear_bit(MLX5E_RQ_FLAG_XDP_XMIT, flags_ptr)) {
 			struct mlx5e_wqe_frag_info *pwi;
-
 			for (pwi = head_wi; pwi < wi; pwi++)
 				pwi->frag_page->frags++;
 		}
@@ -87,7 +94,7 @@ struct sk_buff *fs_create_skb_nonlinear(struct mlxe_rq *rq, u32 index)
 	if (xdp_buff_has_frags(xdp)) {
 		struct skb_shared_info *sinfo;
 		sinfo = xdp_get_shared_info_from_buff(xdp);
-		u32 truesize = QUEUE_GET_XDP_STATE(rq, truesize, index);
+		u32 truesize = QUEUE_GET_XDP_STATE(rq, truesize, b_index);
 
 		/* sinfo->nr_frags is reset by build_skb, calculate again. */
 		xdp_update_skb_shared_info(skb, wi - head_wi - 1,
@@ -109,15 +116,10 @@ static void fs_batch_desc_cqe_linear(struct mlx5e_rq *rq,
 	// farbod: remember which path we are taking
 	u32 pkt_index = rq->xdp_rx_batch->batch.size;
 	QUEUE_GET_XDP_STATE(rq, cqe_type, pkt_index) = cqe_is_linear;
-	QUEUE_GET_XDP_STATE(rq, cqe, pkt_index) = cqe;
 	QUEUE_GET_XDP_STATE(rq, wi_wqe, pkt_index) = wi;
-	QUEUE_GET_XDP_STATE(rq, head_wi, pkt_index) = wi;
 
 	struct mlx5e_frag_page *frag_page = wi->frag_page;
 	u16 rx_headroom = rq->buff.headroom;
-	struct bpf_prog *prog;
-	struct sk_buff *skb;
-	u32 metasize = 0;
 	void *va, *data;
 	dma_addr_t addr;
 	u32 frag_size;
@@ -129,18 +131,13 @@ static void fs_batch_desc_cqe_linear(struct mlx5e_rq *rq,
 	addr = page_pool_get_dma_addr(frag_page->page);
 	dma_sync_single_range_for_cpu(rq->pdev, addr, wi->offset,
 				      frag_size, rq->buff.map_dir);
-	// defer prefetching to later (we are not running the XDP program now)
-	// net_prefetch(data);
-
-	// defer prefetching to later (we are not running the XDP program now)
-	// net_prefetchw(va); /* xdp_frame data area */
 
 	u32 frame_sz = rq->buff.frame0_sz;
 	struct xdp_buff *xdp = QUEUE_GET_XDP_BUFF(rq, pkt_index);
 	xdp_init_buff(xdp, frame_sz, &rq->xdp_rxq);
 	xdp_prepare_buff(xdp, va, rx_headroom, cqe_bcnt, true);
-	rq->buff.actions[pkt_index] = XDP_ABORTED;
-	rq->buff.size++;
+	QUEUE_GET_XDP_ACT(rq, pkt_index) = XDP_ABORTED;
+	rq->xdp_rx_batch->batch.size++;
 }
 
 static void fs_batch_desc_cqe_nonlinear(struct mlx5e_rq *rq,
@@ -149,18 +146,12 @@ static void fs_batch_desc_cqe_nonlinear(struct mlx5e_rq *rq,
 	// farbod: remember which path we are taking
 	u32 pkt_index = rq->xdp_rx_batch->batch.size;
 	QUEUE_GET_XDP_STATE(rq, cqe_type, pkt_index) = cqe_is_nonlinear;
-	QUEUE_GET_XDP_STATE(rq, cqe, pkt_index) = cqe;
-	QUEUE_GET_XDP_STATE(rq, head_wi, pkt_index) = wi;
 
 	struct mlx5e_rq_frag_info *frag_info = &rq->wqe.info.arr[0];
-	struct mlx5e_wqe_frag_info *head_wi = wi;
 	u16 rx_headroom = rq->buff.headroom;
 	struct mlx5e_frag_page *frag_page;
 	struct skb_shared_info *sinfo;
-	struct mlx5e_xdp_buff mxbuf;
 	u32 frag_consumed_bytes;
-	struct bpf_prog *prog;
-	struct sk_buff *skb;
 	dma_addr_t addr;
 	u32 truesize;
 	void *va;
@@ -179,7 +170,7 @@ static void fs_batch_desc_cqe_nonlinear(struct mlx5e_rq *rq,
 	xdp_init_buff(xdp, frame_sz, &rq->xdp_rxq);
 	xdp_prepare_buff(xdp, va, rx_headroom, frag_consumed_bytes, true);
 
-	sinfo = xdp_get_shared_info_from_buff(&mxbuf.xdp);
+	sinfo = xdp_get_shared_info_from_buff(xdp);
 	truesize = 0;
 
 	cqe_bcnt -= frag_consumed_bytes;
@@ -202,8 +193,8 @@ static void fs_batch_desc_cqe_nonlinear(struct mlx5e_rq *rq,
 
 	QUEUE_GET_XDP_STATE(rq, truesize, pkt_index) = truesize;
 	QUEUE_GET_XDP_STATE(rq, wi_wqe, pkt_index) = wi;
-	rq->buff.actions[pkt_index] = XDP_ABORTED;
-	rq->buff.size++;
+	QUEUE_GET_XDP_ACT(rq, pkt_index) = XDP_ABORTED;
+	rq->xdp_rx_batch->batch.size++;
 }
 
 static void fs_handle_rx_cqe(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
@@ -224,11 +215,13 @@ static void fs_handle_rx_cqe(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
 		return;
 	}
 
-	QUEUE_GET_XDP_STATE(rq, cqe, pkt_index) = cqe_bcnt;
+	QUEUE_GET_XDP_STATE(rq, cqe, pkt_index) = cqe;
+	QUEUE_GET_XDP_STATE(rq, cqe_bcnt, pkt_index) = cqe_bcnt;
+	QUEUE_GET_XDP_STATE(rq, head_wi, pkt_index) = wi;
 
-	if (rq->wq.skb_from_cqe == mlx5e_skb_from_cqe_linear) {
+	if (rq->wqe.skb_from_cqe == mlx5e_skb_from_cqe_linear) {
 		fs_batch_desc_cqe_linear(rq, wi, cqe, cqe_bcnt);
-	} else if (rq->wq.skb_from_cqe == mlx5e_skb_from_cqe_nonlinear) {
+	} else if (rq->wqe.skb_from_cqe == mlx5e_skb_from_cqe_nonlinear) {
 		fs_batch_desc_cqe_nonlinear(rq, wi, cqe, cqe_bcnt);
 	} else {
 		printk("XDP batch aware processing: unexpected skb_from_cqe function (in fs_hdndle_rx_cqe)\n");

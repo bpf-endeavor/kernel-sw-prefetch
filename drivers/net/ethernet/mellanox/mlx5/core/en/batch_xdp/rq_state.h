@@ -1,6 +1,12 @@
 #ifndef EN_BATCH_XDP_RQ_STATE_H_
 #define EN_BATCH_XDP_RQ_STATE_H_
 #ifdef CONFIG_XDP_BATCHING
+
+enum cqe_type {
+	cqe_is_linear,
+	cqe_is_nonlinear,
+};
+
 // Farbod: this state thing looks ridiculous. Can I do better?
 struct fs_mlx5_pre_pkt_state {
 	// keep track of which buffer it was
@@ -24,13 +30,8 @@ struct fs_mlx5_pre_pkt_state {
 	u32 cqe_bcnt;
 	u32 truesize; // used in the cqe_nonlinear path
 	// it is originally part of the mlx5e_rq but we need it per each pacekt
-	unsigned char flags;
+	DECLARE_BITMAP(flags, 8);
 	u32 head_offset; // used in MPWRQ
-};
-
-enum cqe_type {
-	cqe_is_linear,
-	cqe_is_nonlinear,
 };
 
 struct mlx5_xdp_recv_batch {
