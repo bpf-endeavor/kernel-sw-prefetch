@@ -1083,6 +1083,13 @@ int mlx5e_create_rq(struct mlx5e_rq *rq, struct mlx5e_rq_param *param, u16 q_cou
 
 	kvfree(in);
 
+#ifdef CONFIG_XDP_BATCHING
+	/* allocate the xdp_recv_batch structure */
+	rq->xdp_rx_batch = kzalloc(sizoef(struct mlx5_xdp_recv_batch), GFP_KERNEL);
+	if (rq->xdp_rx_batch == NULL)
+		return -ENOMEM;
+#endif
+
 	return err;
 }
 
@@ -1184,6 +1191,10 @@ static int mlx5e_modify_rq_vsd(struct mlx5e_rq *rq, bool vsd)
 
 void mlx5e_destroy_rq(struct mlx5e_rq *rq)
 {
+#ifdef CONFIG_XDP_BATCHING
+	/* free the memory we have allocate for xdp batching */
+	kfree(rq->xdp_rx_batch);
+#endif
 	mlx5_core_destroy_rq(rq->mdev, rq->rqn);
 }
 

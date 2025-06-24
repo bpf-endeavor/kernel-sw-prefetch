@@ -2504,6 +2504,8 @@ static int mlx5e_rx_cq_process_basic_cqe_comp(struct mlx5e_rq *rq,
 	return work_done;
 }
 
+#include "en/batch_xdp/rx.h"
+
 int mlx5e_poll_rx_cq(struct mlx5e_cq *cq, int budget)
 {
 	struct mlx5e_rq *rq = container_of(cq, struct mlx5e_rq, cq);
@@ -2513,6 +2515,24 @@ int mlx5e_poll_rx_cq(struct mlx5e_cq *cq, int budget)
 	if (unlikely(!test_bit(MLX5E_RQ_STATE_ENABLED, &rq->state)))
 		return 0;
 
+#ifdef CONFIG_XDP_BATCHING
+	/* Check if we have a batch aware XDP program attached to this queue
+	 * and if yes, process them descriptors in batch */
+	struct bpf_prog *xdp_batch_prog;
+	xdp_batch_prog = rcu_dereference(rq->xdp_prog);
+	if (xdp_batch_prog != NULL) {
+		if (xdp_batch_prog->batching_aware) {
+			work_done = batch_xdp_poll_rx_cq(rq, cqwq, budget, xdp_batch_prog);
+			goto after_xdp_batch_proc;
+		} else {
+			// no batch aware program is loaded
+			xdp_batch_prog = NULL;
+		}
+	} else {
+		// no batch aware program is loaded
+	}
+#endif
+
 	if (test_bit(MLX5E_RQ_STATE_MINI_CQE_ENHANCED, &rq->state))
 		work_done = mlx5e_rx_cq_process_enhanced_cqe_comp(rq, cqwq,
 								  budget);
@@ -2520,6 +2540,7 @@ int mlx5e_poll_rx_cq(struct mlx5e_cq *cq, int budget)
 		work_done = mlx5e_rx_cq_process_basic_cqe_comp(rq, cqwq,
 							       budget);
 
+after_xdp_batch_proc:
 	if (work_done == 0)
 		return 0;
 

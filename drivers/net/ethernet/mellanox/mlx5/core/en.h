@@ -652,6 +652,8 @@ enum mlx5e_mpwrq_umr_mode {
 	MLX5E_MPWRQ_UMR_MODE_TRIPLE,
 };
 
+#include "en/batch_xdp/rq_state.h"
+
 struct mlx5e_rq {
 	/* data path */
 	union {
@@ -716,6 +718,9 @@ struct mlx5e_rq {
 	struct mlx5e_xdpsq    *xdpsq;
 	DECLARE_BITMAP(flags, 8);
 	struct page_pool      *page_pool;
+#ifdef CONFIG_XDP_BATCHING
+	struct mlx5_xdp_recv_batch *xdp_rx_batch;
+#endif
 
 	/* AF_XDP zero-copy */
 	struct xsk_buff_pool  *xsk_pool;
