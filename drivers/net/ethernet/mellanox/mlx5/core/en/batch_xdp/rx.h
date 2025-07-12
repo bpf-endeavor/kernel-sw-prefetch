@@ -1,6 +1,9 @@
 #ifndef FARBOD_MLX5E_BATCH_RX_H
 #ifdef CONFIG_XDP_BATCHING
 
+#define XDP_BATCH_ASSERT(condition) BUG_ON(!(condition))
+// #define XDP_BATCH_ASSERT(x) ;
+
 /*
  * June, 2025; Farbod:
  * This is my attempt in implementing a batch aware XDP interface for MLX5
@@ -262,6 +265,7 @@ static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 	while (work_done < budget) {
 		u32 w = 0;
 		u32 mini_budget = min_t(u32, budget - work_done, MLX5_XDP_BATCH_SIZE);
+		XDP_BATCH_ASSERT(mini_budget <= MLX5_XDP_BATCH_SIZE);
 
 		if (test_bit(MLX5E_RQ_STATE_MINI_CQE_ENHANCED, &rq->state)) {
 			w = process_enhanced_cqe_comp(rq, cqwq, mini_budget);
@@ -277,6 +281,7 @@ static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 
 		// prefetch the packets
 		struct xdp_batch_buff *batch = &rq->xdp_rx_batch->batch;
+		XDP_BATCH_ASSERT(batch->size <= mini_budget);
 		for (int i = 0; i < batch->size; i++) {
 			net_prefetch(batch->buffs[i].data);
 			net_prefetch(batch->buffs[i].data_hard_start);

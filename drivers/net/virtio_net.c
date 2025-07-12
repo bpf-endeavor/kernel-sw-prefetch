@@ -27,6 +27,10 @@
 #include <net/netdev_queues.h>
 #include <net/xdp_sock_drv.h>
 
+/* Use these macros to enable disable logs */
+// #define VIRTIO_DEBUG(...) printk(__VA_ARGS__)
+#define VIRTIO_DEBUG(...) ;
+
 static int napi_weight = NAPI_POLL_WEIGHT;
 module_param(napi_weight, int, 0444);
 
@@ -2936,8 +2940,16 @@ static inline void __xdp_batch_run(unsigned int packets,
 		struct virtnet_rq_stats *stats,
 		unsigned int *xdp_xmit)
 {
-	/* printk("running a batch with %d packets\n", rq->xdp_rx_batch.batch.size); */
-	u32 act = bpf_prog_run(xdp_prog, &rq->xdp_rx_batch->batch);
+	struct xdp_batch_buff *B = &rq->xdp_rx_batch->batch;
+	VIRTIO_DEBUG("running a batch with %d packets\n", B->size);
+	for (int i = 0; i < B->size; i++) {
+		void *data = B->buffs[i].data;
+		void *data_end = B->buffs[i].data_end;
+		u32 size = (u64)data_end - (u64)data;
+		VIRTIO_DEBUG("[%2d] data: @%p   data_end: @%p    size: %d\n",
+				i, data, data_end, size);
+	}
+	u32 act = bpf_prog_run(xdp_prog, B);
 
 	// Apply unwrap the action decide for each packet 
 	u64_stats_add(&stats->xdp_packets, packets);
@@ -3196,9 +3208,11 @@ static int __receive_small_mergeable_packets_in_batch(struct virtnet_info *vi,
 
 	struct net_device *dev = vi->dev;
 
+	int mini_budget = min_t(int, budget, XDP_MAX_BATCH_SIZE);
+
 	// gather the information about location and size of packets we want to
 	// process in batch
-	for (int k = 0; k < budget; k++) {
+	for (int k = 0; k < mini_budget; k++) {
 		// get a buffer out of the virtio queue
 		buf = virtnet_rq_get_buf(rq, &len, &ctx);
 		if (buf == NULL)
@@ -3445,15 +3459,18 @@ static int virtnet_receive_packets(struct virtnet_info *vi,
 		// batching only in small packet mode
 		if (batch_xdp_prog != NULL) {
 			if (vi->mergeable_rx_bufs) {
+				// Farbod: This is the path that I'm testing on my machine... 
+				// VIRTIO_DEBUG("farbod: virtio-net: receive small mergeable packets in batch\n");
 				packets = __receive_small_mergeable_packets_in_batch(vi, rq, budget, xdp_xmit, stats, batch_xdp_prog);
 				rcu_read_unlock();
 				return packets;
 				// we have not handled this path. The program
 				// is batching aware so we can not fallthrough
 				// to the normal path
-				// printk("why do we have small meargable packets?\n");
+				// VIRTIO_DEBUG("why do we have small meargable packets?\n");
 				// BUG_ON(true);
 			} else {
+				// VIRTIO_DEBUG("farbod: virtio-net: receive small non-mergeable packets in batch\n");
 				packets = __receive_small_packets_in_batch(vi, rq, budget, xdp_xmit, stats, batch_xdp_prog);
 				rcu_read_unlock();
 				return packets;
@@ -3472,9 +3489,10 @@ static int virtnet_receive_packets(struct virtnet_info *vi,
 		if (batch_xdp_prog != NULL) {
 			if (!vi->mergeable_rx_bufs) {
 				rcu_read_unlock();
-				printk("the big packet is not mergeable!\n");
+				VIRTIO_DEBUG("the big packet is not mergeable!\n");
 				BUG_ON(true);
 			} else {
+				// VIRTIO_DEBUG("farbod: virtio-net: receive big mergeable packets in batch\n");
 				packets = __receive_big_mergeable_packets_in_batch(vi, rq, budget, xdp_xmit, stats, batch_xdp_prog);
 				rcu_read_unlock();
 				return packets;
@@ -3489,10 +3507,10 @@ static int virtnet_receive_packets(struct virtnet_info *vi,
 		}
 	}
 
-	/* printk("well, our batching code did not ran!\n"); */
-	/* printk("is big: %d\n", vi->big_packets); */
-	/* printk("is mergeable: %d\n", vi->mergeable_rx_bufs); */
-	/* printk("xdp enabled: %d\n", vi->xdp_enabled); */
+	/* VIRTIO_DEBUG("well, our batching code did not ran!\n"); */
+	/* VIRTIO_DEBUG("is big: %d\n", vi->big_packets); */
+	/* VIRTIO_DEBUG("is mergeable: %d\n", vi->mergeable_rx_bufs); */
+	/* VIRTIO_DEBUG("xdp enabled: %d\n", vi->xdp_enabled); */
 	return packets;
 }
 

@@ -2522,6 +2522,7 @@ int mlx5e_poll_rx_cq(struct mlx5e_cq *cq, int budget)
 	xdp_batch_prog = rcu_dereference(rq->xdp_prog);
 	if (xdp_batch_prog != NULL) {
 		if (xdp_batch_prog->batching_aware) {
+			XDP_BATCH_ASSERT(rq->xdp_rx_batch != NULL); // this must not happen
 			work_done = batch_xdp_poll_rx_cq(rq, cqwq, budget, xdp_batch_prog);
 			goto after_xdp_batch_proc;
 		} else {

@@ -6484,6 +6484,19 @@ enum xdp_action {
  * new fields must be added to the end of this structure
  */
 struct xdp_md {
+	/* Farbod: Why add a padding: because eBPF is stupid!
+	 * It needs to convert the accesses to context and provide information to
+	 * verifier by for example mentioning the field is a pointer to packet. I
+	 * have an array of contexes and I can not distinguies between accessing to
+	 * the xdp_md or reading its data field so I can not provide the correct
+	 * information (ptr to context or ptr to packet). 
+	 *
+	 * Adding this padding should help me solve the issue and recognize when
+	 * we are refrencing a context and when we are read the data field.
+	 * ---
+	 * Already have lost a week on figuring this out! Argh...
+	 * */
+	__u32 padding;
 	__u32 data;
 	__u32 data_end;
 	__u32 data_meta;
@@ -6496,11 +6509,11 @@ struct xdp_md {
 
 /* THIS IS USEFUL WHEN CONFIG_XDP_BATCHING is enabled */
 /* other definition is at include/net/xdp.h */
-#define XDP_MAX_BATCH_SIZE 32
+#define XDP_MAX_BATCH_SIZE 8
 struct xdp_batch_md {
-	unsigned short size;
-	struct xdp_md buffs[32];
-	unsigned int actions[32];
+	__u32 size;
+	struct xdp_md buffs[XDP_MAX_BATCH_SIZE];
+	__u32 actions[XDP_MAX_BATCH_SIZE];
 };
 /* --------------------- */
 

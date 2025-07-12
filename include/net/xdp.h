@@ -92,12 +92,12 @@ struct xdp_buff {
 #ifdef CONFIG_XDP_BATCHING
 #ifndef XDP_MAX_BATCH_SIZE
 // other definition is at include/uapi/linux/bpf.h
-#define XDP_MAX_BATCH_SIZE 32
+#define XDP_MAX_BATCH_SIZE 8
 #endif
 struct xdp_batch_buff {
-	unsigned short size;
+	u32 size;
 	struct xdp_buff buffs[XDP_MAX_BATCH_SIZE];
-	unsigned int actions[XDP_MAX_BATCH_SIZE];
+	u32 actions[XDP_MAX_BATCH_SIZE];
 };
 #endif
 
