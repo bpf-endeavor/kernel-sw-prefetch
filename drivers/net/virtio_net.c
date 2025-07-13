@@ -2943,11 +2943,9 @@ static inline void __xdp_batch_run(unsigned int packets,
 	struct xdp_batch_buff *B = &rq->xdp_rx_batch->batch;
 	VIRTIO_DEBUG("running a batch with %d packets\n", B->size);
 	for (int i = 0; i < B->size; i++) {
-		void *data = B->buffs[i].data;
-		void *data_end = B->buffs[i].data_end;
-		u32 size = (u64)data_end - (u64)data;
 		VIRTIO_DEBUG("[%2d] data: @%p   data_end: @%p    size: %d\n",
-				i, data, data_end, size);
+				i, B->buffs[i].data, B->buffs[i].data_end,
+				(u64)data_end - (u64)data);
 	}
 	u32 act = bpf_prog_run(xdp_prog, B);
 

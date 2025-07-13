@@ -10357,7 +10357,7 @@ static u32 xdp_batch_convert_ctx_access(enum bpf_access_type type,
 		// set new_off to the offset to the begining of that element
 		// in an array of ``struct xdp_buffs''
 		extract_index(off - array_begin_off, sizeof(struct xdp_md),
-			sizeof(struct xdp_batch_buff), &index, &rem, &new_off);
+			sizeof(struct xdp_buff), &index, &rem, &new_off);
 		// adjust for the offset of buffs array in the struct
 		new_off += offsetof(struct xdp_batch_buff, buffs);
 		// copy-paste of what was originally written (code below this
