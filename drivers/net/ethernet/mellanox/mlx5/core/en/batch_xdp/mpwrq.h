@@ -151,6 +151,7 @@ void fs_batch_desc_mpwrq_nonlinear(struct mlx5e_rq *rq,
 {
 	// farbod: remember which path we are taking
 	u32 pkt_index = rq->xdp_rx_batch->batch.size;
+	XDP_BATCH_ASSERT(pkt_index < XDP_MAX_BATCH_SIZE);
 	QUEUE_GET_XDP_STATE(rq, cqe_type, pkt_index) = cqe_is_nonlinear;
 	QUEUE_GET_XDP_STATE(rq, wi_mpw, pkt_index) = wi;
 
@@ -220,6 +221,7 @@ void fs_batch_desc_mpwrq_linear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *wi,
 {
 	// farbod: remember which path we are taking
 	u32 pkt_index = rq->xdp_rx_batch->batch.size;
+	XDP_BATCH_ASSERT(pkt_index < XDP_MAX_BATCH_SIZE);
 	QUEUE_GET_XDP_STATE(rq, cqe_type, pkt_index) = cqe_is_linear;
 	QUEUE_GET_XDP_STATE(rq, wi_mpw, pkt_index) = wi;
 	QUEUE_GET_XDP_STATE(rq, count_page, pkt_index) = 1;
@@ -307,14 +309,18 @@ void fs_handle_rx_cqe_mpwrq(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
 	cqe_bcnt = mpwrq_get_cqe_byte_cnt(cqe);
 
 	u32 pkt_index = rq->xdp_rx_batch->batch.size;
+	XDP_BATCH_ASSERT(pkt_index < XDP_MAX_BATCH_SIZE);
 	QUEUE_GET_XDP_STATE(rq, cqe, pkt_index) = cqe;
 	QUEUE_GET_XDP_STATE(rq, cqe_bcnt, pkt_index) = cqe_bcnt;
 	QUEUE_GET_XDP_STATE(rq, page_index, pkt_index) = page_idx;
 	QUEUE_GET_XDP_STATE(rq, head_offset, pkt_index) = head_offset;
 
 	if (rq->mpwqe.skb_from_cqe_mpwrq == mlx5e_skb_from_cqe_mpwrq_linear) {
+		// NOTE: In my test environment this is the path
+		/* printk("mpwrq linear"); */
 		fs_batch_desc_mpwrq_linear(rq, wi, cqe, cqe_bcnt, head_offset, page_idx);
 	} else if (rq->mpwqe.skb_from_cqe_mpwrq == mlx5e_skb_from_cqe_mpwrq_nonlinear) {
+		printk("mpwrq nonlinear");
 		fs_batch_desc_mpwrq_nonlinear(rq, wi, cqe, cqe_bcnt, head_offset, page_idx);
 	} else {
 		// I have not implemented the mlx5e_xsk_skb_from_cqe_mpwrq_linear

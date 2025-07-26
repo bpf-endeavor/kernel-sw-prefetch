@@ -84,16 +84,22 @@
 #include <linux/bpf_trace.h>
 #include "en/batch_xdp/xdp_helpers.h"
 
+#define XDP_BATCH_DEBUG_MODE 1
+
 static inline __attribute__((always_inline))
 void clear_the_batch(struct mlx5e_rq *rq)
 {
 	rq->xdp_rx_batch->batch.size = 0;
+#ifdef XDP_BATCH_DEBUG_MODE
+	memset(rq->xdp_rx_batch, 0, sizeof(struct mlx5_xdp_recv_batch));
+#endif
 }
 
 static
 void fs_indirect_call_finalize_rx_cqe(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq)
 {
 	u32 sz = rq->xdp_rx_batch->batch.size;
+	XDP_BATCH_ASSERT(sz <= XDP_MAX_BATCH_SIZE);
 	struct sk_buff *skb;
 
 	if (rq->handle_rx_cqe == mlx5e_handle_rx_cqe_mpwrq) {
@@ -124,9 +130,6 @@ void fs_indirect_call_finalize_rx_cqe(struct mlx5e_rq *rq, struct mlx5_cqwq *cqw
 		printk("XDP batch aware processing: unexpected rx handler, finalize\n");
 		BUG_ON (true);
 	}
-
-	// It is important to reset the number of descriptors in the batch
-	clear_the_batch(rq);
 }
 
 /* Check which function was being called before and select the
@@ -140,10 +143,10 @@ void fs_indirect_call_handle_rx_cqe(struct mlx5e_rq *rq,
 {
 	if (rq->handle_rx_cqe == mlx5e_handle_rx_cqe_mpwrq) {
 		// NOTE: in my test environment this path is selected
-		/* printk("mpwrq\n"); */
+		// printk("mpwrq\n");
 		fs_handle_rx_cqe_mpwrq(rq, cqe);
 	} else if (rq->handle_rx_cqe == mlx5e_handle_rx_cqe) {
-		/* printk("cqe\n"); */
+		printk("cqe\n");
 		fs_handle_rx_cqe(rq, cqe);
 	} else {
 		// There is the fs_batch_rx_cqe_mpwrq_shampo(rq, cqe)
@@ -255,6 +258,7 @@ int process_basic_cqe_comp(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 
 	while (work_done < budget_rem && (cqe = mlx5_cqwq_get_cqe(cqwq))) {
 		if (mlx5_get_cqe_format(cqe) == MLX5_COMPRESSED) {
+			printk("observing compressed cqe\n");
 			work_done +=
 				fs_mlx5e_decompress_cqes_start(rq, cqwq,
 							    budget_rem - work_done);
@@ -288,12 +292,15 @@ static void run_xdp_batch_proc(struct bpf_prog *prog, struct mlx5e_rq *rq)
 				// it and pass it to the network stack.
 				continue;
 			case XDP_TX:
-				if (unlikely(!mlx5e_xmit_xdp_buff(rq->xdpsq, rq,
-								&batch->buffs[i])))
+				if (unlikely(!fs_mlx5e_xmit_xdp_buff(rq->xdpsq, rq,
+								&batch->buffs[i]))) {
+					printk("failed to xmit xdp buff\n");
 					goto xdp_abort;
+				}
 				// mark that we have transmitted this buffer.
 				__set_bit(MLX5E_RQ_FLAG_XDP_XMIT,
 						QUEUE_GET_XDP_STATE(rq, flags, i)); /* non-atomic */
+				/* __set_bit(MLX5E_RQ_FLAG_XDP_XMIT, rq->flags); /1* non-atomic *1/ */
 				continue;
 			case XDP_REDIRECT:
 				/* When XDP enabled then page-refcnt==1 here */
@@ -304,6 +311,9 @@ static void run_xdp_batch_proc(struct bpf_prog *prog, struct mlx5e_rq *rq)
 						QUEUE_GET_XDP_STATE(rq, flags, i));
 				__set_bit(MLX5E_RQ_FLAG_XDP_REDIRECT,
 						QUEUE_GET_XDP_STATE(rq, flags, i));
+
+				/* __set_bit(MLX5E_RQ_FLAG_XDP_XMIT, rq->flags); /1* non-atomic *1/ */
+				__set_bit(MLX5E_RQ_FLAG_XDP_REDIRECT, rq->flags); /* non-atomic */
 				rq->stats->xdp_redirect++;
 				continue;
 			default:
@@ -311,6 +321,7 @@ static void run_xdp_batch_proc(struct bpf_prog *prog, struct mlx5e_rq *rq)
 				fallthrough;
 			case XDP_ABORTED:
 xdp_abort:
+				batch->actions[i] = XDP_DROP; // make sure we are dropping
 				trace_xdp_exception(rq->netdev, prog, act);
 				fallthrough;
 			case XDP_DROP:
@@ -335,16 +346,19 @@ static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 	u32 work_done = 0;
 	// TODO: check if this looping helps or not
 	while (work_done < budget) {
+		// It is important to reset the number of descriptors in the batch
+		clear_the_batch(rq);
+
 		u32 w = 0;
 		u32 mini_budget = min_t(u32, budget - work_done, MLX5_XDP_BATCH_SIZE);
 		XDP_BATCH_ASSERT(mini_budget <= MLX5_XDP_BATCH_SIZE);
 
 		if (test_bit(MLX5E_RQ_STATE_MINI_CQE_ENHANCED, &rq->state)) {
-			/* printk("enhanced cqe\n"); */
+			printk("enhanced cqe\n");
 			w = process_enhanced_cqe_comp(rq, cqwq, mini_budget);
 		} else {
 			// NOTE: on my test env, this path is selected
-			/* printk("basic cqe\n"); */
+			// printk("basic cqe\n");
 			w = process_basic_cqe_comp(rq, cqwq, mini_budget);
 		}
 
@@ -367,6 +381,7 @@ static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 		// create the SKBs and pass packets to network stack (or not if XDP has
 		// consumed it)
 		fs_indirect_call_finalize_rx_cqe(rq, cqwq);
+		break; // lets break so that we actually do flush ..., then if this solves the issue I can think why.
 	}
 	return work_done;
 }
