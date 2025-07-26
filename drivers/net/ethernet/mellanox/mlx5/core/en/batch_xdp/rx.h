@@ -1,4 +1,5 @@
 #ifndef FARBOD_MLX5E_BATCH_RX_H
+#define FARBOD_MLX5E_BATCH_RX_H
 #ifdef CONFIG_XDP_BATCHING
 
 #define XDP_BATCH_ASSERT(condition) BUG_ON(!(condition))
@@ -7,9 +8,9 @@
 /*
  * June, 2025; Farbod:
  * This is my attempt in implementing a batch aware XDP interface for MLX5
- * driver. My understanding of the NIC-driver interaction is weak but Here some
- * notes (mostly to myself) about what I've learnt and want to do in this
- * implementation.
+ * driver. My understanding of the NIC-driver interaction is weak but Here is
+ * some notes (intended for myself) about what I've learnt and want to do in
+ * this implementation.
  *
  * == Disclaimer ==
  * What is wrong with my approach? I've  tried to apply changes to the driver
@@ -37,7 +38,7 @@
  * == Code Organization ==
  * - poll_rx_cq is just an entry function. it is called by the NAPI subsystem,
  *   and if there is a batch aware XDP program attached, the control flow is
- *   diverted to here.
+ *   steered to here.
  *
  * - ``process cqe'' functions loop over the batch of CQE and call appropriate
  *   handlers. Notice that ``work_done'' counter maintained in the loop does
@@ -55,6 +56,19 @@
  *
  * - ``batch desc'' The batching function should prepare the rq.xdp_rx_batch
  *    invoking the batch aware XDP program
+ *
+ * - ``run_xdp_batch_proc'' this phase is just invoking an eBPF program with
+ *   ``xdp_batch_buff'' as context.
+ *
+ * == Bookkeeping ==
+ * How I track state of each packet?
+ * A new field has been added to receive queue (``xdp_rx_batch''). This field
+ * has a member named ``batch'' which is the context passed to XDP program, and
+ * a field named ``S'' which is the extra state kept by runtime for the batch.
+ *
+ * Use the QUEUE_GET_XDP_ macros as a more intuitive way to get information of
+ * a packet from a receive queue object.
+ *
  * */
 
 /* These macros help with packig/unpackig state of each packet in the batch */
@@ -66,6 +80,9 @@
 #include "en/batch_xdp/mpwrq.h"
 // move the normal CQE handling to another file to avoid confusion
 #include "en/batch_xdp/cqe.h"
+
+#include <linux/bpf_trace.h>
+#include "en/batch_xdp/xdp_helpers.h"
 
 static inline __attribute__((always_inline))
 void clear_the_batch(struct mlx5e_rq *rq)
@@ -122,8 +139,11 @@ void fs_indirect_call_handle_rx_cqe(struct mlx5e_rq *rq,
 		struct mlx5_cqe64 *cqe)
 {
 	if (rq->handle_rx_cqe == mlx5e_handle_rx_cqe_mpwrq) {
+		// NOTE: in my test environment this path is selected
+		/* printk("mpwrq\n"); */
 		fs_handle_rx_cqe_mpwrq(rq, cqe);
 	} else if (rq->handle_rx_cqe == mlx5e_handle_rx_cqe) {
+		/* printk("cqe\n"); */
 		fs_handle_rx_cqe(rq, cqe);
 	} else {
 		// There is the fs_batch_rx_cqe_mpwrq_shampo(rq, cqe)
@@ -134,7 +154,8 @@ void fs_indirect_call_handle_rx_cqe(struct mlx5e_rq *rq,
 }
 
 static int process_enhanced_cqe_comp(struct mlx5e_rq *rq,
-						 struct mlx5_cqwq *cqwq, int budget_rem)
+						 struct mlx5_cqwq *cqwq,
+						 int budget_rem)
 {
 	struct mlx5_cqe64 *cqe, *title_cqe = NULL;
 	struct mlx5e_cq_decomp *cqd = &rq->cqd;
@@ -248,6 +269,57 @@ int process_basic_cqe_comp(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 	return work_done;
 }
 
+/* Run an XDP batch aware program. If it consume the packet we need to do some
+ * bookkeeping.
+ * */
+static void run_xdp_batch_proc(struct bpf_prog *prog, struct mlx5e_rq *rq)
+{
+	int err;
+	struct xdp_batch_buff *batch = &rq->xdp_rx_batch->batch;
+
+	// run the batch aware XDP program
+	bpf_prog_run(prog, batch);
+
+	for (int i = 0; i < batch->size; i++) {
+		u32 act = batch->actions[i];
+		switch (act) {
+			case XDP_PASS:
+				// nothing to do here; later we make an skb for
+				// it and pass it to the network stack.
+				continue;
+			case XDP_TX:
+				if (unlikely(!mlx5e_xmit_xdp_buff(rq->xdpsq, rq,
+								&batch->buffs[i])))
+					goto xdp_abort;
+				// mark that we have transmitted this buffer.
+				__set_bit(MLX5E_RQ_FLAG_XDP_XMIT,
+						QUEUE_GET_XDP_STATE(rq, flags, i)); /* non-atomic */
+				continue;
+			case XDP_REDIRECT:
+				/* When XDP enabled then page-refcnt==1 here */
+				err = xdp_do_redirect(rq->netdev, &batch->buffs[i], prog);
+				if (unlikely(err))
+					goto xdp_abort;
+				__set_bit(MLX5E_RQ_FLAG_XDP_XMIT,
+						QUEUE_GET_XDP_STATE(rq, flags, i));
+				__set_bit(MLX5E_RQ_FLAG_XDP_REDIRECT,
+						QUEUE_GET_XDP_STATE(rq, flags, i));
+				rq->stats->xdp_redirect++;
+				continue;
+			default:
+				bpf_warn_invalid_xdp_action(rq->netdev, prog, act);
+				fallthrough;
+			case XDP_ABORTED:
+xdp_abort:
+				trace_xdp_exception(rq->netdev, prog, act);
+				fallthrough;
+			case XDP_DROP:
+				rq->stats->xdp_drop++;
+				continue;
+		}
+	}
+}
+
 // Maximum value is limited by the XDP_MAX_BATCH_SIZE
 #define MLX5_XDP_BATCH_SIZE 8
 static_assert(MLX5_XDP_BATCH_SIZE <= XDP_MAX_BATCH_SIZE);
@@ -268,8 +340,11 @@ static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 		XDP_BATCH_ASSERT(mini_budget <= MLX5_XDP_BATCH_SIZE);
 
 		if (test_bit(MLX5E_RQ_STATE_MINI_CQE_ENHANCED, &rq->state)) {
+			/* printk("enhanced cqe\n"); */
 			w = process_enhanced_cqe_comp(rq, cqwq, mini_budget);
 		} else {
+			// NOTE: on my test env, this path is selected
+			/* printk("basic cqe\n"); */
 			w = process_basic_cqe_comp(rq, cqwq, mini_budget);
 		}
 
@@ -287,8 +362,7 @@ static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 			net_prefetch(batch->buffs[i].data_hard_start);
 		}
 
-		// run the batch aware XDP program
-		bpf_prog_run(prog, batch);
+		run_xdp_batch_proc(prog, rq);
 
 		// create the SKBs and pass packets to network stack (or not if XDP has
 		// consumed it)
