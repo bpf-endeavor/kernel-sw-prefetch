@@ -2,8 +2,13 @@
 #define FARBOD_MLX5E_BATCH_RX_H
 #ifdef CONFIG_XDP_BATCHING
 
+#define XDP_BATCH_DEBUG_MODE 1
+
+#ifdef XDP_BATCH_DEBUG_MODE
 #define XDP_BATCH_ASSERT(condition) BUG_ON(!(condition))
-// #define XDP_BATCH_ASSERT(x) ;
+#else
+#define XDP_BATCH_ASSERT(x) ;
+#endif
 
 /*
  * June, 2025; Farbod:
@@ -69,6 +74,13 @@
  * Use the QUEUE_GET_XDP_ macros as a more intuitive way to get information of
  * a packet from a receive queue object.
  *
+ * == Testing ==
+ * Mellanox have multiple operations mode depending on hardware and software
+ * configurations. The following code path is tested in my environment:
+ *
+ *   -- basic cqe & linear mpwrq
+ *   -- no xdp multi-buffer
+ *
  * */
 
 /* These macros help with packig/unpackig state of each packet in the batch */
@@ -84,15 +96,15 @@
 #include <linux/bpf_trace.h>
 #include "en/batch_xdp/xdp_helpers.h"
 
-#define XDP_BATCH_DEBUG_MODE 1
-
 static inline __attribute__((always_inline))
 void clear_the_batch(struct mlx5e_rq *rq)
 {
 	rq->xdp_rx_batch->batch.size = 0;
-#ifdef XDP_BATCH_DEBUG_MODE
-	memset(rq->xdp_rx_batch, 0, sizeof(struct mlx5_xdp_recv_batch));
-#endif
+	rq->xdp_rx_batch->wqe_ids.size = 0;
+
+/* #ifdef XDP_BATCH_DEBUG_MODE */
+/* 	memset(rq->xdp_rx_batch, 0, sizeof(struct mlx5_xdp_recv_batch)); */
+/* #endif */
 }
 
 static
@@ -112,6 +124,7 @@ void fs_indirect_call_finalize_rx_cqe(struct mlx5e_rq *rq, struct mlx5_cqwq *cqw
 			}
 			fs_finilize_rx_cqe_mpwrq(rq, i, skb);
 		}
+		check_and_inc_mpwrq(rq);
 	} else if (rq->handle_rx_cqe == mlx5e_handle_rx_cqe) {
 		for (int i = 0; i < sz; i++) {
 			// continue creating SKB from XDP descriptor
@@ -253,8 +266,10 @@ int process_basic_cqe_comp(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 	struct mlx5_cqe64 *cqe;
 	int work_done = 0;
 
-	if (rq->cqd.left)
+	if (rq->cqd.left) {
+		printk("basic cqe: work left\n");
 		work_done += mlx5e_decompress_cqes_cont(rq, cqwq, 0, budget_rem);
+	}
 
 	while (work_done < budget_rem && (cqe = mlx5_cqwq_get_cqe(cqwq))) {
 		if (mlx5_get_cqe_format(cqe) == MLX5_COMPRESSED) {
@@ -331,10 +346,6 @@ xdp_abort:
 	}
 }
 
-// Maximum value is limited by the XDP_MAX_BATCH_SIZE
-#define MLX5_XDP_BATCH_SIZE 8
-static_assert(MLX5_XDP_BATCH_SIZE <= XDP_MAX_BATCH_SIZE);
-
 /* Entry function of xdp batching feature
  * @param rq: rx queue
  * ...
@@ -344,6 +355,7 @@ static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 		int budget, struct bpf_prog *prog)
 {
 	u32 work_done = 0;
+
 	// TODO: check if this looping helps or not
 	while (work_done < budget) {
 		// It is important to reset the number of descriptors in the batch
@@ -368,15 +380,19 @@ static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 		}
 		work_done += w;
 
-		// prefetch the packets
+		// check if we have any packets to process (otherwise it was only
+		// controlling messages and errors)
 		struct xdp_batch_buff *batch = &rq->xdp_rx_batch->batch;
-		XDP_BATCH_ASSERT(batch->size <= mini_budget);
-		for (int i = 0; i < batch->size; i++) {
-			net_prefetch(batch->buffs[i].data);
-			net_prefetch(batch->buffs[i].data_hard_start);
-		}
+		if (batch->size > 0) {
+			// prefetch the packets
+			XDP_BATCH_ASSERT(batch->size <= mini_budget);
+			for (int i = 0; i < batch->size; i++) {
+				net_prefetch(batch->buffs[i].data);
+				net_prefetch(batch->buffs[i].data_hard_start);
+			}
 
-		run_xdp_batch_proc(prog, rq);
+			run_xdp_batch_proc(prog, rq);
+		}
 
 		// create the SKBs and pass packets to network stack (or not if XDP has
 		// consumed it)

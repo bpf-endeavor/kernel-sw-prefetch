@@ -2,6 +2,35 @@
 #define EN_BATCH_XDP_MPWRQ_H_
 
 #ifdef CONFIG_XDP_BATCHING
+
+/* I'm not sure how exactly mpwrq works. But it seems as part of cleaning
+ * proces we need to update a cursor. This code should do that for the work
+ * queues we see while preparing a batch.
+ *
+ * Not all CQEs, and hence WQs we see are a packet (maybe there is an error or
+ * ...) That is the reason we keep their state separate from batch of packets.
+ * */
+static void check_and_inc_mpwrq(struct mlx5e_rq *rq)
+{
+	u16 sz = rq->xdp_rx_batch->wqe_ids.size;
+	for (u16 k = 0; k < sz; k++) {
+		u16 wqe_id = rq->xdp_rx_batch->wqe_ids.id[k];
+		struct mlx5e_mpw_info *wi = mlx5e_get_mpw_info(rq, wqe_id);
+
+		if (likely(wi->consumed_strides < rq->mpwqe.num_strides))
+			return;
+
+		// we have released this work queue, do not repeat it if its id
+		// is in the list multiple times.
+		wi->consumed_strides = 0;
+
+		struct mlx5_wq_ll *wq = &rq->mpwqe.wq;
+		struct mlx5e_rx_wqe_ll *wqe = mlx5_wq_ll_get_wqe(wq, wqe_id);
+		mlx5_wq_ll_pop(wq, be16_to_cpu(wqe_id), &wqe->next.next_wqe_index);
+	}
+}
+
+
 // second half: functions below are called after we have run the batch aware
 // XDP program --------------------------------------------------------------
 //
@@ -9,53 +38,38 @@
 static void fs_finilize_rx_cqe_mpwrq(struct mlx5e_rq *rq, int b_index,
 		struct sk_buff *skb)
 {
-	struct mlx5e_rx_wqe_ll *wqe;
-	struct mlx5_wq_ll *wq;
-	struct mlx5_cqe64 *cqe = QUEUE_GET_XDP_STATE(rq, cqe, b_index);
-	struct mlx5e_mpw_info *wi = QUEUE_GET_XDP_STATE(rq, wi_mpw, b_index);
-	u32 cqe_bcnt = QUEUE_GET_XDP_STATE(rq, cqe_bcnt, b_index);
-
-	// TODO: finalize skb creation
-
 	if (!skb)
-		goto mpwrq_cqe_out;
+		return;
+
+	struct mlx5_cqe64 *cqe = QUEUE_GET_XDP_STATE(rq, cqe, b_index);
+	u32 cqe_bcnt = QUEUE_GET_XDP_STATE(rq, cqe_bcnt, b_index);
 
 	mlx5e_complete_rx_cqe(rq, cqe, cqe_bcnt, skb);
 
-	if (mlx5e_cqe_regb_chain(cqe))
+	if (mlx5e_cqe_regb_chain(cqe)) {
 		if (!mlx5e_tc_update_skb_nic(cqe, skb)) {
 			dev_kfree_skb_any(skb);
-			goto mpwrq_cqe_out;
+			return;
 		}
+	}
 
 	napi_gro_receive(rq->cq.napi, skb);
-
-mpwrq_cqe_out:
-	if (likely(wi->consumed_strides < rq->mpwqe.num_strides))
-		return;
-
-	wq  = &rq->mpwqe.wq;
-	wqe = mlx5_wq_ll_get_wqe(wq, be16_to_cpu(cqe->wqe_id));
-	mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index);
 }
 
 static
 struct sk_buff *fs_create_skb_mpwrq_linear(struct mlx5e_rq *rq, u32 index)
 {
 	u32 act = QUEUE_GET_XDP_ACT(rq, index);
+	if (act != XDP_PASS) {
+		return NULL; /* page/packet was consumed by XDP */
+	}
+
 	struct mlx5e_frag_page *frag_page;
 	struct mlx5e_mpw_info *wi;
 
 	wi = QUEUE_GET_XDP_STATE(rq, wi_mpw, index);
 	u32 page_idx = QUEUE_GET_XDP_STATE(rq, page_index, index);
 	frag_page = &wi->alloc_units.frag_pages[page_idx];
-
-	if (act != XDP_PASS) {
-		long unsigned int *flags_ptr = (long unsigned int *)&QUEUE_GET_XDP_STATE(rq, flags, index);
-		if (__test_and_clear_bit(MLX5E_RQ_FLAG_XDP_XMIT, flags_ptr))
-			frag_page->frags++;
-		return NULL; /* page/packet was consumed by XDP */
-	}
 
 	struct xdp_buff *xdp = QUEUE_GET_XDP_BUFF(rq, index);
 
@@ -74,7 +88,7 @@ struct sk_buff *fs_create_skb_mpwrq_linear(struct mlx5e_rq *rq, u32 index)
 
 	/* queue up for recycling/reuse */
 	skb_mark_for_recycle(skb);
-	frag_page->frags++;
+	/* frag_page->frags++; */
 
 	return skb;
 }
@@ -146,8 +160,8 @@ struct sk_buff *fs_create_skb_mpwrq_nolinear(struct mlx5e_rq *rq, u32 index)
 // first half: below is code for before running the batch aware XDP program ---
 static
 void fs_batch_desc_mpwrq_nonlinear(struct mlx5e_rq *rq,
-			struct mlx5e_mpw_info *wi, struct mlx5_cqe64 *cqe, u16 cqe_bcnt,
-			u32 head_offset, u32 page_idx)
+			struct mlx5e_mpw_info *wi, struct mlx5_cqe64 *cqe,
+			u16 cqe_bcnt, u32 head_offset, u32 page_idx)
 {
 	// farbod: remember which path we are taking
 	u32 pkt_index = rq->xdp_rx_batch->batch.size;
@@ -168,15 +182,15 @@ void fs_batch_desc_mpwrq_nonlinear(struct mlx5e_rq *rq,
 	if (unlikely(mlx5e_page_alloc_fragmented(rq, &wi->linear_page))) {
 		rq->stats->buff_alloc_err++;
 
-		if (likely(wi->consumed_strides < rq->mpwqe.num_strides))
-			return;
+		/* if (likely(wi->consumed_strides < rq->mpwqe.num_strides)) */
+		/* 	return; */
 
-		struct mlx5e_rx_wqe_ll *wqe;
-		struct mlx5_wq_ll *wq;
-		wq  = &rq->mpwqe.wq;
-		wqe = mlx5_wq_ll_get_wqe(wq, be16_to_cpu(cqe->wqe_id));
-		mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index);
-		return;
+		/* struct mlx5e_rx_wqe_ll *wqe; */
+		/* struct mlx5_wq_ll *wq; */
+		/* wq  = &rq->mpwqe.wq; */
+		/* wqe = mlx5_wq_ll_get_wqe(wq, be16_to_cpu(cqe->wqe_id)); */
+		/* mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index); */
+		/* return; */
 	}
 
 	va = page_address(wi->linear_page.page);
@@ -216,8 +230,8 @@ void fs_batch_desc_mpwrq_nonlinear(struct mlx5e_rq *rq,
 
 static
 void fs_batch_desc_mpwrq_linear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *wi,
-				struct mlx5_cqe64 *cqe, u16 cqe_bcnt, u32 head_offset,
-				u32 page_idx)
+				struct mlx5_cqe64 *cqe, u16 cqe_bcnt,
+				u32 head_offset, u32 page_idx)
 {
 	// farbod: remember which path we are taking
 	u32 pkt_index = rq->xdp_rx_batch->batch.size;
@@ -235,16 +249,17 @@ void fs_batch_desc_mpwrq_linear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *wi,
 	/* Check packet size. Note LRO doesn't use linear SKB */
 	if (unlikely(cqe_bcnt > rq->hw_mtu)) {
 		rq->stats->oversize_pkts_sw_drop++;
-
-		if (likely(wi->consumed_strides < rq->mpwqe.num_strides))
-			return;
-
-		struct mlx5e_rx_wqe_ll *wqe;
-		struct mlx5_wq_ll *wq;
-		wq  = &rq->mpwqe.wq;
-		wqe = mlx5_wq_ll_get_wqe(wq, be16_to_cpu(cqe->wqe_id));
-		mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index);
 		return;
+
+		/* if (likely(wi->consumed_strides < rq->mpwqe.num_strides)) */
+		/* 	return; */
+
+		/* struct mlx5e_rx_wqe_ll *wqe; */
+		/* struct mlx5_wq_ll *wq; */
+		/* wq  = &rq->mpwqe.wq; */
+		/* wqe = mlx5_wq_ll_get_wqe(wq, be16_to_cpu(cqe->wqe_id)); */
+		/* mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index); */
+		/* return; */
 	}
 
 	va             = page_address(frag_page->page) + head_offset;
@@ -262,6 +277,8 @@ void fs_batch_desc_mpwrq_linear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *wi,
 
 	QUEUE_GET_XDP_ACT(rq, pkt_index) = XDP_ABORTED;
 	rq->xdp_rx_batch->batch.size++;
+	// we are holding this page until we pass it to XDP
+	frag_page->frags++;
 }
 
 static
@@ -274,20 +291,23 @@ void fs_handle_rx_cqe_mpwrq(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
 	u32 wqe_offset     = stride_ix << rq->mpwqe.log_stride_sz;
 	u32 head_offset    = wqe_offset & ((1 << rq->mpwqe.page_shift) - 1);
 	u32 page_idx       = wqe_offset >> rq->mpwqe.page_shift;
-	struct mlx5e_rx_wqe_ll *wqe;
-	struct mlx5_wq_ll *wq;
+	/* struct mlx5e_rx_wqe_ll *wqe; */
+	/* struct mlx5_wq_ll *wq; */
 	u16 cqe_bcnt;
+
+	u16 tmp_index = rq->xdp_rx_batch->wqe_ids.size++;
+	rq->xdp_rx_batch->wqe_ids.id[tmp_index] = wqe_id;
 
 	wi->consumed_strides += cstrides;
 
 	if (unlikely(MLX5E_RX_ERR_CQE(cqe))) {
 		mlx5e_handle_rx_err_cqe(rq, cqe);
-		if (likely(wi->consumed_strides < rq->mpwqe.num_strides))
-			return;
+		/* if (likely(wi->consumed_strides < rq->mpwqe.num_strides)) */
+		/* 	return; */
 
-		wq  = &rq->mpwqe.wq;
-		wqe = mlx5_wq_ll_get_wqe(wq, wqe_id);
-		mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index);
+		/* wq  = &rq->mpwqe.wq; */
+		/* wqe = mlx5_wq_ll_get_wqe(wq, wqe_id); */
+		/* mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index); */
 		return;
 	}
 
@@ -297,12 +317,12 @@ void fs_handle_rx_cqe_mpwrq(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
 		stats->mpwqe_filler_cqes++;
 		stats->mpwqe_filler_strides += cstrides;
 
-		if (likely(wi->consumed_strides < rq->mpwqe.num_strides))
-			return;
+		/* if (likely(wi->consumed_strides < rq->mpwqe.num_strides)) */
+		/* 	return; */
 
-		wq  = &rq->mpwqe.wq;
-		wqe = mlx5_wq_ll_get_wqe(wq, wqe_id);
-		mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index);
+		/* wq  = &rq->mpwqe.wq; */
+		/* wqe = mlx5_wq_ll_get_wqe(wq, wqe_id); */
+		/* mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index); */
 		return;
 	}
 

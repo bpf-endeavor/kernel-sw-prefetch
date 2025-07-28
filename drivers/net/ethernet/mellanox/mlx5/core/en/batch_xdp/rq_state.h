@@ -2,6 +2,10 @@
 #define EN_BATCH_XDP_RQ_STATE_H_
 #ifdef CONFIG_XDP_BATCHING
 
+// Maximum value is limited by the XDP_MAX_BATCH_SIZE
+#define MLX5_XDP_BATCH_SIZE 8
+static_assert(MLX5_XDP_BATCH_SIZE <= XDP_MAX_BATCH_SIZE);
+
 enum cqe_type {
 	cqe_is_linear,
 	cqe_is_nonlinear,
@@ -37,6 +41,11 @@ struct fs_mlx5_pre_pkt_state {
 struct mlx5_xdp_recv_batch {
 	struct xdp_batch_buff batch;
 	struct fs_mlx5_pre_pkt_state S[XDP_MAX_BATCH_SIZE];
+	// ----
+	struct {
+		__u16 id[MLX5_XDP_BATCH_SIZE];
+		__u16 size;
+	} wqe_ids;
 };
 #endif // CONFIG_XDP_BATCHING
 #endif // EN_BATCH_XDP_RQ_STATE_H_
