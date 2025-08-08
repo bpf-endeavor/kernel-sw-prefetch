@@ -4215,8 +4215,13 @@ BPF_CALL_2(bpf_xdp_adjust_tail, struct xdp_buff *, xdp, int, offset)
 	}
 
 	/* Notice that xdp_data_hard_end have reserved some tailroom */
-	if (unlikely(data_end > data_hard_end))
+	if (unlikely(data_end > data_hard_end)) {
+		printk("data_end goes above hard line treshold (delta: %d)\n",
+				offset);
+		printk("data: %p    data_end: %p    data_hard_end: %p\n",
+				xdp->data, xdp->data_end, data_hard_end);
 		return -EINVAL;
+	}
 
 	if (unlikely(data_end < xdp->data + ETH_HLEN))
 		return -EINVAL;

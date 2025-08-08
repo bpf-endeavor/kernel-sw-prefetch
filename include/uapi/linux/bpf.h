@@ -6495,15 +6495,20 @@ struct xdp_md {
 	 * we are refrencing a context and when we are read the data field.
 	 * ---
 	 * Already have lost a week on figuring this out! Argh...
+	 *
+	 * --
+	 * Argh..., I am here again...
+	 * Adding more padding to make xdp_md the same size as
+	 * xdp_buff. It should make life easier when passing the buff
+	 * structure to helpers like xdp_adjust_tail, ...
 	 * */
-	__u32 padding;
+	void *padding[4];
 	__u32 data;
 	__u32 data_end;
 	__u32 data_meta;
 	/* Below access go through struct xdp_rxq_info */
 	__u32 ingress_ifindex; /* rxq->dev->ifindex */
 	__u32 rx_queue_index;  /* rxq->queue_index  */
-
 	__u32 egress_ifindex;  /* txq->dev->ifindex */
 };
 
