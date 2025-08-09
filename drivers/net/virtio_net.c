@@ -2941,6 +2941,11 @@ static inline void __xdp_batch_run(unsigned int packets,
 		unsigned int *xdp_xmit)
 {
 	struct xdp_batch_buff *B = &rq->xdp_rx_batch->batch;
+	if (B->size == 0) {
+		// ignore
+		return;
+	}
+
 	VIRTIO_DEBUG("running a batch with %d packets\n", B->size);
 	for (int i = 0; i < B->size; i++) {
 		VIRTIO_DEBUG("[%2d] data: @%p   data_end: @%p    size: %d\n",
@@ -3148,6 +3153,14 @@ err:
 		packets--;
 		// the current packet was not good :). ignore it
 	}
+
+	// check if there is no packet to process, then do not invoke the XDP
+	// program with an empty batch
+	if (packets == 0) {
+		__process_outstanding_xmit_frames(rq, dev, xdp_prog, xdp_xmit);
+		return 0;
+	}
+
 	rq->xdp_rx_batch->batch.size = packets; // set the size of the batch
 
 	// batch apply this:
@@ -3277,6 +3290,14 @@ static int __receive_small_mergeable_packets_in_batch(struct virtnet_info *vi,
 		rq->xdp_rx_batch->batch.actions[packets] = XDP_ABORTED;
 		packets++;
 	}
+
+	// check if there is no packet to process, then do not invoke the XDP
+	// program with an empty batch
+	if (packets == 0) {
+		__process_outstanding_xmit_frames(rq, dev, xdp_prog, xdp_xmit);
+		return 0;
+	}
+
 	rq->xdp_rx_batch->batch.size = packets;
 
 	__xdp_batch_run(packets, rq, dev, xdp_prog, stats, xdp_xmit);
@@ -3391,6 +3412,14 @@ static int __receive_big_mergeable_packets_in_batch(struct virtnet_info *vi,
 		rq->xdp_rx_batch->batch.actions[packets] = XDP_ABORTED;
 		packets++;
 	}
+
+	// check if there is no packet to process, then do not invoke the XDP
+	// program with an empty batch
+	if (packets == 0) {
+		__process_outstanding_xmit_frames(rq, dev, xdp_prog, xdp_xmit);
+		return 0;
+	}
+
 	rq->xdp_rx_batch->batch.size = packets;
 
 	__xdp_batch_run(packets, rq, dev, xdp_prog, stats, xdp_xmit);
