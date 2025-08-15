@@ -59,16 +59,34 @@ static void fs_finilize_rx_cqe_mpwrq(struct mlx5e_rq *rq, int b_index,
 static
 struct sk_buff *fs_create_skb_mpwrq_linear(struct mlx5e_rq *rq, u32 index)
 {
+	struct mlx5e_frag_page *frag_page;
+	struct mlx5e_mpw_info *wi;
+	u32 page_idx;
+
 	u32 act = QUEUE_GET_XDP_ACT(rq, index);
 	if (act != XDP_PASS) {
+
+		// TODO: Is this the right place to free the page?
+		if (act == XDP_DROP) {
+			wi = QUEUE_GET_XDP_STATE(rq, wi_mpw, index);
+			page_idx = QUEUE_GET_XDP_STATE(rq, page_index, index);
+			frag_page = &wi->alloc_units.frag_pages[page_idx];
+			frag_page->frags--;
+			// TODO: do I need to free things here, or will the driver do it later?
+			// if (frag_page->frags == 0) {
+			// 	struct page* page = frag_page->page;
+			// 	/* No need to check ((page->pp_magic & ~0x3UL) == PP_SIGNATURE)
+			// 	 * as we know this is a page_pool page.
+			// 	 */
+			// 	page_pool_recycle_direct(page->pp, page);
+			// }
+		}
+
 		return NULL; /* page/packet was consumed by XDP */
 	}
 
-	struct mlx5e_frag_page *frag_page;
-	struct mlx5e_mpw_info *wi;
-
 	wi = QUEUE_GET_XDP_STATE(rq, wi_mpw, index);
-	u32 page_idx = QUEUE_GET_XDP_STATE(rq, page_index, index);
+	page_idx = QUEUE_GET_XDP_STATE(rq, page_index, index);
 	frag_page = &wi->alloc_units.frag_pages[page_idx];
 
 	struct xdp_buff *xdp = QUEUE_GET_XDP_BUFF(rq, index);

@@ -397,7 +397,7 @@ static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 		// create the SKBs and pass packets to network stack (or not if XDP has
 		// consumed it)
 		fs_indirect_call_finalize_rx_cqe(rq, cqwq);
-		break; // lets break so that we actually do flush ..., then if this solves the issue I can think why.
+		// break; // lets break so that we actually do flush ..., then if this solves the issue I can think why.
 	}
 	return work_done;
 }
