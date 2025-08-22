@@ -79,6 +79,7 @@ enum xdp_buff_flags {
 };
 
 struct xdp_buff {
+	u32 __padding__;
 	void *data;
 	void *data_end;
 	void *data_meta;

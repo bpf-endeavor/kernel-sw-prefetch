@@ -88,8 +88,8 @@
 
 #include "dev.h"
 
-// #define FILTER_DEBUG(...) printk(__VA_ARGS__)
-#define FILTER_DEBUG(...) ;
+#define FILTER_DEBUG(...) printk(__VA_ARGS__)
+// #define FILTER_DEBUG(...) ;
 
 /* Keep the struct bpf_fib_lookup small so that it fits into a cacheline */
 static_assert(sizeof(struct bpf_fib_lookup) == 64, "struct bpf_fib_lookup size check");
@@ -9161,7 +9161,7 @@ static bool xdp_batch_is_valid_access(int off, int size,
 		// figure out which field of the ``struct xdp_md'' we are accessing
 		u16 remaining = (off - buffs_begin) - (index * sizeof(struct xdp_md));
 		switch (remaining) {
-			case offsetof(struct xdp_md, padding):
+			case offsetof(struct xdp_md, __padding__):
 				/* It is probably accessing the beginning of a
 				 * XDP_MD struct! fuck this shit! */
 				FILTER_DEBUG("xdp batch: access was to padding field!\n");
@@ -9222,7 +9222,11 @@ static bool xdp_is_valid_access(int off, int size,
 		return false;
 	} else {
 		switch (off) {
-		case offsetof(struct xdp_md, padding):
+		case offsetof(struct xdp_md, __padding__):
+		case offsetof(struct xdp_md, __data__padding__):
+		case offsetof(struct xdp_md, __data_end__padding__):
+		case offsetof(struct xdp_md, __data_meta__padding__):
+		case offsetof(struct xdp_md, __padding_end__):
 			/* Farbod: do not access the fucking padding field */
 			return false;
 		case offsetof(struct xdp_md, data_meta):
@@ -10306,14 +10310,14 @@ static void extract_index(int off, size_t arr_type_size, size_t arr2_type_size,
 
 /* I should create a mapping between these two structures:
  * struct xdp_batch_md {
- * 	u16 size;
+ * 	u32 size;
  * 	struct xdp_md buffs[XDP_MAX_BATCH_SIZE];
  * 	u32 actions[XDP_MAX_BATCH_SIZE];
  * };
  *
  *
  * struct xdp_batch_buff {
- * 	u16 size;
+ * 	u32 size;
  * 	struct xdp_buff buffs[XDP_MAX_BATCH_SIZE];
  * 	u32 actions[XDP_MAX_BATCH_SIZE];
  * }
@@ -10324,6 +10328,23 @@ static u32 xdp_batch_convert_ctx_access(enum bpf_access_type type,
 		struct bpf_insn *insn_buf,
 		struct bpf_prog *prog, u32 *target_size)
 {
+	/* Look, it seems I can not determine which field was actually
+	 * accessed. It only works if src_reg value is zero, and since have
+	 * multiple xdp_md in my batch, the compiler generates code that
+	 * violates this assumption when I'm looping.
+	 *
+	 * Since I don't know which field I am accessing:
+	 * 1) the translation must be Noop
+	 * 2) the access size must be the same for all 
+	 *
+	 * But this means the size, and actions should be of type u64...
+	 * Let's just assume the accesses to xdp_md is with some src_reg offset
+	 * and rest of the fields are fine.
+	 *
+	 * Also, I am assuming we are only using data, data_end, data_meta
+	 * fields
+	 * */
+
 	u32 array_begin_off = 0;
 	u32 array_end_off = 0;
 	u32 index = 0;
@@ -10333,16 +10354,7 @@ static u32 xdp_batch_convert_ctx_access(enum bpf_access_type type,
 	const int off = si->off;
 	struct bpf_insn *insn = insn_buf;
 
-	/* this must never happen, but nothing stops compiler from generating a
-	 * negative offset. Even the is_valid_access function does not solve
-	 * the issue because the offset it checks is sum with a register.
-	 *
-	 * Farbod: is this a potential exploitable bug?
-	 * */
-	BUG_ON(off < 0); 
-
 	FILTER_DEBUG("The xdp_batch_convert_ctx_access is being called (offset: %d - type: %d)\n", off, type);
-
 
 	// if it is reading the size field, then ...
 	if (off == offsetof(struct xdp_batch_md, size)) {
@@ -10350,89 +10362,6 @@ static u32 xdp_batch_convert_ctx_access(enum bpf_access_type type,
 		*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_batch_buff, size),
 				si->dst_reg, si->src_reg,
 				offsetof(struct xdp_batch_buff, size));
-		return insn - insn_buf;
-	}
-
-	// check if it's reading an xdp_md from the array
-	array_begin_off = offsetof(struct xdp_batch_md, buffs);
-	array_end_off = array_begin_off +
-		(sizeof(struct xdp_md) * XDP_MAX_BATCH_SIZE);
-	if (off >= array_begin_off && off < array_end_off) {
-		// figure out which index of the array we are accessing and 
-		// set new_off to the offset to the begining of that element
-		// in an array of ``struct xdp_buffs''
-		extract_index(off - array_begin_off, sizeof(struct xdp_md),
-			sizeof(struct xdp_buff), &index, &rem, &new_off);
-		// adjust for the offset of buffs array in the struct
-		new_off += offsetof(struct xdp_batch_buff, buffs);
-		// copy-paste of what was originally written (code below this
-		// function) for converting xdp_md to xdp_buff
-		FILTER_DEBUG("accessing xdp_md in batch at index: %d\n", index);
-		BUG_ON(new_off & 0xffff0000);
-		switch (rem) {
-			case offsetof(struct xdp_md, padding):
-				/* Farbod: this is the fucking padding field.
-				 * It should be the begining of XDP_BUFF. I'll
-				 * do the same I do for data. But what the fuck
-				 * is this! */
-				new_off += offsetof(struct xdp_buff, data);
-				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data),
-						si->dst_reg, si->src_reg,
-						(short)(new_off));
-				FILTER_DEBUG("batch xdp: accessing padding: index: %d   new off: %d\n", index, new_off);
-				break;
-			case offsetof(struct xdp_md, data):
-				new_off += offsetof(struct xdp_buff, data);
-				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data),
-						si->dst_reg, si->src_reg,
-						(short)(new_off));
-				FILTER_DEBUG("batch xdp: accessing data: index: %d   new off: %d\n", index, new_off);
-				break;
-			case offsetof(struct xdp_md, data_meta):
-				new_off += offsetof(struct xdp_buff, data_meta);
-				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data_meta),
-						si->dst_reg, si->src_reg,
-						(short)(new_off));
-				FILTER_DEBUG("batch xdp: accessing meta_data\n");
-				break;
-			case offsetof(struct xdp_md, data_end):
-				new_off += offsetof(struct xdp_buff, data_end);
-				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data_end),
-						si->dst_reg, si->src_reg,
-						(short)(new_off));
-				FILTER_DEBUG("batch xdp: accessing data_end\n");
-				break;
-			case offsetof(struct xdp_md, ingress_ifindex):
-				new_off += offsetof(struct xdp_buff, rxq);
-				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, rxq),
-						si->dst_reg, si->src_reg, new_off);
-				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_rxq_info, dev),
-						si->dst_reg, si->dst_reg, offsetof(struct xdp_rxq_info, dev));
-				*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg, offsetof(struct net_device, ifindex));
-				break;
-			case offsetof(struct xdp_md, rx_queue_index):
-				new_off += offsetof(struct xdp_buff, rxq);
-				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, rxq),
-						si->dst_reg, si->src_reg, new_off);
-				*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg,
-						offsetof(struct xdp_rxq_info,
-							queue_index));
-				break;
-			case offsetof(struct xdp_md, egress_ifindex):
-				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, txq),
-						si->dst_reg, si->src_reg,
-						offsetof(struct xdp_buff, txq) + new_off);
-				*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_txq_info, dev),
-						si->dst_reg, si->dst_reg,
-						offsetof(struct xdp_txq_info, dev));
-				*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg,
-						offsetof(struct net_device, ifindex));
-				break;
-			default:
-				FILTER_DEBUG("something is wrongshould set a valid offset\n");
-				BUG_ON(true);
-				break;
-		}
 		return insn - insn_buf;
 	}
 
@@ -10460,8 +10389,98 @@ static u32 xdp_batch_convert_ctx_access(enum bpf_access_type type,
 		return insn - insn_buf;
 	}
 
-	FILTER_DEBUG("what are we accessing? off: %d\n", off);
-	BUG_ON(true);
+	// check if it's reading an xdp_md from the array
+	// array_begin_off = offsetof(struct xdp_batch_md, buffs);
+	// array_end_off = array_begin_off +
+	// 	(sizeof(struct xdp_md) * XDP_MAX_BATCH_SIZE);
+	// if (off >= array_begin_off && off < array_end_off) {
+	// 	// figure out which index of the array we are accessing and 
+	// 	// set new_off to the offset to the begining of that element
+	// 	// in an array of ``struct xdp_buffs''
+	// 	extract_index(off - array_begin_off, sizeof(struct xdp_md),
+	// 		sizeof(struct xdp_buff), &index, &rem, &new_off);
+	// 	// adjust for the offset of buffs array in the struct
+	// 	new_off += offsetof(struct xdp_batch_buff, buffs);
+	// 	// copy-paste of what was originally written (code below this
+	// 	// function) for converting xdp_md to xdp_buff
+	// 	FILTER_DEBUG("accessing xdp_md in batch at index: %d\n", index);
+	// 	BUG_ON(new_off & 0xffff0000);
+	// 	switch (rem) {
+	// 		case offsetof(struct xdp_md, padding):
+	// 			/* Farbod: this is the fucking padding field.
+	// 			 * It should be the begining of XDP_BUFF. I'll
+	// 			 * do the same I do for data. But what the fuck
+	// 			 * is this! */
+	// 			new_off += offsetof(struct xdp_buff, data);
+	// 			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data),
+	// 					si->dst_reg, si->src_reg,
+	// 					(short)(new_off));
+	// 			FILTER_DEBUG("batch xdp: accessing padding: index: %d   new off: %d\n", index, new_off);
+	// 			break;
+	// 		case offsetof(struct xdp_md, data):
+	// 			new_off += offsetof(struct xdp_buff, data);
+	// 			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data),
+	// 					si->dst_reg, si->src_reg,
+	// 					(short)(new_off));
+	// 			FILTER_DEBUG("batch xdp: accessing data: index: %d   new off: %d\n", index, new_off);
+	// 			break;
+	// 		case offsetof(struct xdp_md, data_meta):
+	// 			new_off += offsetof(struct xdp_buff, data_meta);
+	// 			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data_meta),
+	// 					si->dst_reg, si->src_reg,
+	// 					(short)(new_off));
+	// 			FILTER_DEBUG("batch xdp: accessing meta_data\n");
+	// 			break;
+	// 		case offsetof(struct xdp_md, data_end):
+	// 			new_off += offsetof(struct xdp_buff, data_end);
+	// 			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data_end),
+	// 					si->dst_reg, si->src_reg,
+	// 					(short)(new_off));
+	// 			FILTER_DEBUG("batch xdp: accessing data_end\n");
+	// 			break;
+	// 		case offsetof(struct xdp_md, ingress_ifindex):
+	// 			new_off += offsetof(struct xdp_buff, rxq);
+	// 			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, rxq),
+	// 					si->dst_reg, si->src_reg, new_off);
+	// 			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_rxq_info, dev),
+	// 					si->dst_reg, si->dst_reg, offsetof(struct xdp_rxq_info, dev));
+	// 			*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg, offsetof(struct net_device, ifindex));
+	// 			break;
+	// 		case offsetof(struct xdp_md, rx_queue_index):
+	// 			new_off += offsetof(struct xdp_buff, rxq);
+	// 			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, rxq),
+	// 					si->dst_reg, si->src_reg, new_off);
+	// 			*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg,
+	// 					offsetof(struct xdp_rxq_info,
+	// 						queue_index));
+	// 			break;
+	// 		case offsetof(struct xdp_md, egress_ifindex):
+	// 			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, txq),
+	// 					si->dst_reg, si->src_reg,
+	// 					offsetof(struct xdp_buff, txq) + new_off);
+	// 			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_txq_info, dev),
+	// 					si->dst_reg, si->dst_reg,
+	// 					offsetof(struct xdp_txq_info, dev));
+	// 			*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg,
+	// 					offsetof(struct net_device, ifindex));
+	// 			break;
+	// 		default:
+	// 			FILTER_DEBUG("something is wrongshould set a valid offset\n");
+	// 			BUG_ON(true);
+	// 			break;
+	// 	}
+	// 	return insn - insn_buf;
+	// }
+
+	// FILTER_DEBUG("what are we accessing? off: %d\n", off);
+	// BUG_ON(true);
+	// return insn - insn_buf;
+
+	// Assume we are reading from buffs arrray (an xdp_md objet). All of
+	// the fields are pointers (sizeof(void *))
+	*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data), si->dst_reg, si->src_reg, off);
+	// assuming we are not reading rx_queue_index, ... which are more
+	// complicated
 	return insn - insn_buf;
 }
 #endif

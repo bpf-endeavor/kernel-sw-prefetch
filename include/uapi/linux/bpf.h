@@ -6501,15 +6501,27 @@ struct xdp_md {
 	 * Adding more padding to make xdp_md the same size as
 	 * xdp_buff. It should make life easier when passing the buff
 	 * structure to helpers like xdp_adjust_tail, ...
+	 * --
+	 *  Aligning xdp_md and xdp_buff ... both size and offset of important
+	 *  fields.
 	 * */
-	void *padding[4];
+	__u32 __padding__; /* helps distinguish if we are referencing the context
+						  in the batch or the data field */
 	__u32 data;
+	__u32 __data__padding__;  /* make data 8 bytes */
+
 	__u32 data_end;
+	__u32 __data_end__padding__; /* make data_end 8 bytes */
+
 	__u32 data_meta;
+	__u32 __data_meta__padding__; /* make data_meta 8 bytes */
+
 	/* Below access go through struct xdp_rxq_info */
 	__u32 ingress_ifindex; /* rxq->dev->ifindex */
 	__u32 rx_queue_index;  /* rxq->queue_index  */
 	__u32 egress_ifindex;  /* txq->dev->ifindex */
+
+	__u32 __padding_end__[5]; /* make the structure the same size of xdp_buff */
 };
 
 /* THIS IS USEFUL WHEN CONFIG_XDP_BATCHING is enabled */
