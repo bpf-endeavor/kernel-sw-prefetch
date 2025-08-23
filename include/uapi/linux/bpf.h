@@ -6505,8 +6505,9 @@ struct xdp_md {
 	 *  Aligning xdp_md and xdp_buff ... both size and offset of important
 	 *  fields.
 	 * */
-	__u32 __padding__; /* helps distinguish if we are referencing the context
+	__u64 __padding__; /* helps distinguish if we are referencing the context
 						  in the batch or the data field */
+
 	__u32 data;
 	__u32 __data__padding__;  /* make data 8 bytes */
 
@@ -6529,6 +6530,7 @@ struct xdp_md {
 #define XDP_MAX_BATCH_SIZE 8
 struct xdp_batch_md {
 	__u32 size;
+	__u32 __padding__;
 	struct xdp_md buffs[XDP_MAX_BATCH_SIZE];
 	__u32 actions[XDP_MAX_BATCH_SIZE];
 };

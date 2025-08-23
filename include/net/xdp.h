@@ -79,7 +79,7 @@ enum xdp_buff_flags {
 };
 
 struct xdp_buff {
-	u32 __padding__;
+	u64 __padding__;
 	void *data;
 	void *data_end;
 	void *data_meta;
@@ -90,6 +90,7 @@ struct xdp_buff {
 	u32 flags; /* supported values defined in xdp_buff_flags */
 };
 
+
 #ifdef CONFIG_XDP_BATCHING
 #ifndef XDP_MAX_BATCH_SIZE
 // other definition is at include/uapi/linux/bpf.h
@@ -97,6 +98,7 @@ struct xdp_buff {
 #endif
 struct xdp_batch_buff {
 	u32 size;
+	u32 __padding__;
 	struct xdp_buff buffs[XDP_MAX_BATCH_SIZE];
 	u32 actions[XDP_MAX_BATCH_SIZE];
 };

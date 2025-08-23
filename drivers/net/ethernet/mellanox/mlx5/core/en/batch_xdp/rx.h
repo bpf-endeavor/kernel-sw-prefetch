@@ -296,6 +296,17 @@ static void run_xdp_batch_proc(struct bpf_prog *prog, struct mlx5e_rq *rq)
 	int err;
 	struct xdp_batch_buff *batch = &rq->xdp_rx_batch->batch;
 
+	/* NOTE: for debugging, xdp context conversion. print some more info about
+	 * packets in the batch */
+
+	/* for (int i = 0; i < batch->size; i++) { */
+	/* 	void *data = batch->buffs[i].data; */
+	/* 	void *data_end = batch->buffs[i].data_end; */
+	/* 	size_t size = (u64)data_end - (u64)data; */
+	/* 	printk("[%2d] data: @%p   data_end: @%p   size: %d\n", */
+	/* 		i, data, data_end, size); */
+	/* } */
+
 	// run the batch aware XDP program
 	bpf_prog_run(prog, batch);
 
@@ -309,7 +320,7 @@ static void run_xdp_batch_proc(struct bpf_prog *prog, struct mlx5e_rq *rq)
 			case XDP_TX:
 				if (unlikely(!fs_mlx5e_xmit_xdp_buff(rq->xdpsq, rq,
 								&batch->buffs[i]))) {
-					printk("failed to xmit xdp buff\n");
+					printk(KERN_ERR "failed to xmit xdp buff\n");
 					goto xdp_abort;
 				}
 				// mark that we have transmitted this buffer.
