@@ -9108,8 +9108,8 @@ static bool __is_valid_xdp_access(int off, int size)
 		return false;
 	if (off % size != 0)
 		return false;
-	if (size != sizeof(__u32))
-		return false;
+	/* if (size != sizeof(__u32)) */
+	/* 	return false; */
 
 	return true;
 }
@@ -9128,8 +9128,8 @@ static bool xdp_batch_is_valid_access(int off, int size,
 	// check xdp related access conditions
 	if (off % size != 0)
 		return false;
-	if (size != sizeof(__u32))
-		return false;
+	/* if (size != sizeof(__u32)) */
+	/* 	return false; */
 
 	// check the writes are only on actions field
 	u32 actions_array = offsetof(struct xdp_batch_md, actions);
@@ -9223,8 +9223,8 @@ static bool xdp_is_valid_access(int off, int size,
 	} else {
 		switch (off) {
 		case offsetof(struct xdp_md, __padding__):
-		case offsetof(struct xdp_md, __data__padding__):
-		case offsetof(struct xdp_md, __data_end__padding__):
+		/* case offsetof(struct xdp_md, __data__padding__): */
+		/* case offsetof(struct xdp_md, __data_end__padding__): */
 		case offsetof(struct xdp_md, __data_meta__padding__):
 		case offsetof(struct xdp_md, __padding_end__):
 			/* Farbod: do not access the fucking padding field */
@@ -10293,21 +10293,6 @@ static u32 tc_cls_act_convert_ctx_access(enum bpf_access_type type,
 
 #ifdef CONFIG_XDP_BATCHING
 
-static void extract_index(int off, size_t arr_type_size, size_t arr2_type_size,
-		u32 *index, u32 *rem, u32 *new_off)
-{
-	// convery bytes into first array to an index
-	u16 tmp = off / arr_type_size;
-	*index = tmp;
-
-	// relying on integer rounding the value down to get how many bytes we
-	// are short to have traversed a full index
-	*rem = off - (tmp * arr_type_size);
-
-	// what is the offset in the new array (bytes)
-	*new_off = (tmp * arr2_type_size); 
-}
-
 /* I should create a mapping between these two structures:
  * struct xdp_batch_md {
  * 	u32 size;
@@ -10322,90 +10307,52 @@ static void extract_index(int off, size_t arr_type_size, size_t arr2_type_size,
  * 	u32 actions[XDP_MAX_BATCH_SIZE];
  * }
  *
+ * But, I can not determine which field was actually accessed because I want to
+ * allow eBPF program to use a src_reg as a base offset of its pointer. The
+ * original XDP code only works if src_reg value is zero. The compiler
+ * generates code that violates this assumption when I'm looping over my batch
+ * of xdp_md unless I completely unroll the loop.
+ *
+ * Since I don't know which field I am accessing, I should arrange the things
+ * in a way that eBPF program and compiler generates the correct instructions,
+ * and making this conversion step a No-OP.
+ *
+ * For this purpose I have made xdp_md and xdp_buff the same size and made sure
+ * the fields are aligned (by adding reserved fields as padding).  Also, I am
+ * assuming we are only using data, data_end fields of the xdp_md.
  * */
 static u32 xdp_batch_convert_ctx_access(enum bpf_access_type type,
 		const struct bpf_insn *si,
 		struct bpf_insn *insn_buf,
 		struct bpf_prog *prog, u32 *target_size)
 {
-	/* Look, it seems I can not determine which field was actually
-	 * accessed. It only works if src_reg value is zero, and since have
-	 * multiple xdp_md in my batch, the compiler generates code that
-	 * violates this assumption when I'm looping.
-	 *
-	 * Since I don't know which field I am accessing:
-	 * 1) the translation must be Noop
-	 * 2) the access size must be the same for all
-	 *
-	 * But this means the size, and actions should be of type u64...
-	 * Let's just assume the accesses to xdp_md is with some src_reg offset
-	 * and rest of the fields are fine.
-	 *
-	 * Also, I am assuming we are only using data, data_end, data_meta
-	 * fields
-	 * */
 
 	/* Make sure these two structs are actually aligned */
 	BUILD_BUG_ON(sizeof(struct xdp_batch_buff) != sizeof(struct xdp_batch_md));
 	BUILD_BUG_ON(sizeof(struct xdp_buff) != sizeof(struct xdp_md));
+	BUILD_BUG_ON(offsetof(struct xdp_batch_buff, size) != offsetof(struct xdp_batch_md, size));
 	BUILD_BUG_ON(offsetof(struct xdp_batch_buff, buffs) != offsetof(struct xdp_batch_md, buffs));
 	BUILD_BUG_ON(offsetof(struct xdp_batch_buff, actions) != offsetof(struct xdp_batch_md, actions));
 	BUILD_BUG_ON(offsetof(struct xdp_buff, data) != offsetof(struct xdp_md, data));
 	BUILD_BUG_ON(offsetof(struct xdp_buff, data_end) != offsetof(struct xdp_md, data_end));
+#define FIELD(type, name) (((type *)(NULL))->name)
+	BUILD_BUG_ON(sizeof(FIELD(struct xdp_buff,data)) != sizeof(FIELD(struct xdp_md, data)));
+	BUILD_BUG_ON(sizeof(FIELD(struct xdp_buff, data_end)) != sizeof(FIELD(struct xdp_md, data_end)));
 	/* ------------------------------------------------ */
 
-	u32 array_begin_off = 0;
-	u32 array_end_off = 0;
-	u32 index = 0;
-	u32 rem = 0;
-	u32 new_off = 0;
 	// the program wants to access this offset
 	const int off = si->off;
 	struct bpf_insn *insn = insn_buf;
 
 	FILTER_DEBUG("The xdp_batch_convert_ctx_access is being called (offset: %d - type: %d)\n", off, type);
 
-	// if it is reading the size field, then ...
-	if (off == offsetof(struct xdp_batch_md, size)) {
-		FILTER_DEBUG("accessing batch size\n");
-		*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_batch_buff, size),
-				si->dst_reg, si->src_reg,
-				offsetof(struct xdp_batch_buff, size));
-		return insn - insn_buf;
+	u8 s = BPF_SIZE(si->code);
+	if (type == BPF_WRITE) {
+		*target_size = s == BPF_W ? 4 : s == BPF_DW ? 8 : s == BPF_H ? 2 : 1;
+		*insn++ = BPF_EMIT_STORE(s, si, off);
+	} else {
+		*insn++ = BPF_LDX_MEM(s, si->dst_reg, si->src_reg, off);
 	}
-
-	// check if we are accessing the ``actions'' array
-	array_begin_off = offsetof(struct xdp_batch_md, actions);
-	array_end_off = array_begin_off + (sizeof(unsigned int) * XDP_MAX_BATCH_SIZE);
-	if (off >= array_begin_off && off < array_end_off) {
-		extract_index(off - array_begin_off, 4, 4, &index, &rem, &new_off);
-		BUG_ON(rem != 0);
-		new_off += offsetof(struct xdp_batch_buff, actions);
-		FILTER_DEBUG("aaccessing actions at index: %d\n", index);
-		if (type == BPF_READ) {
-			// we are reading a value
-			// action is u32 its size is BPF_W
-			*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->src_reg, new_off);
-		} else if (type == BPF_WRITE) {
-			// we are writing a value
-			// *insn++ = BPF_STX_MEM(BPF_W, si->dst_reg, si->src_reg, indexed_object);
-			*target_size = 4;
-			*insn++ = BPF_EMIT_STORE(BPF_W, si, new_off);
-		} else {
-			FILTER_DEBUG("unexpected! are we reading, writing or what?!");
-			BUG_ON(true);
-		}
-		return insn - insn_buf;
-	}
-
-	// Assume we are reading from buffs arrray (an xdp_md objet). All of
-	// the fields are pointers (sizeof(void *)) and they are aligned with
-	// xdp_buff so we do not need to change the offset.
-	//
-	// This means I am assuming we are not reading rx_queue_index, etc.
-	// which are more complicated
-	*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct xdp_buff, data),
-			si->dst_reg, si->src_reg, off);
 	return insn - insn_buf;
 }
 #endif
