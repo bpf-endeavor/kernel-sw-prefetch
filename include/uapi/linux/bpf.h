@@ -6529,7 +6529,7 @@ struct xdp_md {
 
 /* THIS IS USEFUL WHEN CONFIG_XDP_BATCHING is enabled */
 /* other definition is at include/net/xdp.h */
-#define XDP_MAX_BATCH_SIZE 8
+#define XDP_MAX_BATCH_SIZE 32
 struct xdp_batch_md {
 	__u32 size;
 	__u32 __padding__;

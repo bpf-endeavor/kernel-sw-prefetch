@@ -2351,12 +2351,21 @@ static void mlx5_core_verify_params(void)
 	}
 }
 
+#ifdef CONFIG_XDP_BATCHING
+#include "en/batch_xdp/procfs.h"
+#endif
+
 static int __init mlx5_init(void)
 {
 	int err;
 
 	WARN_ONCE(strcmp(MLX5_ADEV_NAME, KBUILD_MODNAME),
 		  "mlx5_core name not in sync with kernel module name");
+
+	printk("Farbod: modified MLX5 driver!");
+#ifdef CONFIG_XDP_BATCHING
+	xdp_batch_procfs_setup();
+#endif
 
 	get_random_bytes(&sw_owner_id, sizeof(sw_owner_id));
 
@@ -2388,6 +2397,10 @@ err_debug:
 
 static void __exit mlx5_cleanup(void)
 {
+#ifdef CONFIG_XDP_BATCHING
+	xdp_batch_procfs_remove();
+#endif
+
 	pci_unregister_driver(&mlx5_core_driver);
 	mlx5_sf_driver_unregister();
 	mlx5e_cleanup();

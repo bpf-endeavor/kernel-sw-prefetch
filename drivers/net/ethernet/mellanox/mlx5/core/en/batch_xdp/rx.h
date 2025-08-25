@@ -81,6 +81,12 @@
  *   -- basic cqe & linear mpwrq
  *   -- no xdp multi-buffer
  *
+ * == Page Pool ==
+ * I have only tested the page-pool memory model. The mlx5_frag_page object has
+ * a frags counter used for reference counting. In this part of the code I just
+ * need to make sure I update the ref count correctly. The freeing will happen
+ * later in other part of the mlx5 driver. This means if I want to hold a page,
+ * I must increase its ``frags'' otherwise it will be recycled.
  * */
 
 /* These macros help with packig/unpackig state of each packet in the batch */
@@ -101,10 +107,6 @@ void clear_the_batch(struct mlx5e_rq *rq)
 {
 	rq->xdp_rx_batch->batch.size = 0;
 	rq->xdp_rx_batch->wqe_ids.size = 0;
-
-/* #ifdef XDP_BATCH_DEBUG_MODE */
-/* 	memset(rq->xdp_rx_batch, 0, sizeof(struct mlx5_xdp_recv_batch)); */
-/* #endif */
 }
 
 static
@@ -373,8 +375,7 @@ static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 		clear_the_batch(rq);
 
 		u32 w = 0;
-		u32 mini_budget = min_t(u32, budget - work_done, MLX5_XDP_BATCH_SIZE);
-		XDP_BATCH_ASSERT(mini_budget <= MLX5_XDP_BATCH_SIZE);
+		u32 mini_budget = min_t(u32, budget - work_done, xdp_batch_size);
 
 		if (test_bit(MLX5E_RQ_STATE_MINI_CQE_ENHANCED, &rq->state)) {
 			printk("enhanced cqe\n");

@@ -2,9 +2,12 @@
 #define EN_BATCH_XDP_RQ_STATE_H_
 #ifdef CONFIG_XDP_BATCHING
 
-// Maximum value is limited by the XDP_MAX_BATCH_SIZE
-#define MLX5_XDP_BATCH_SIZE 8
+/* Maximum value is limited by the XDP_MAX_BATCH_SIZE */
+#define MLX5_XDP_BATCH_SIZE 32
 static_assert(MLX5_XDP_BATCH_SIZE <= XDP_MAX_BATCH_SIZE);
+
+/* dynamically configurable through proc-fs */
+extern u32 xdp_batch_size;
 
 enum cqe_type {
 	cqe_is_linear,
