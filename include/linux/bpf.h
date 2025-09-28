@@ -2009,7 +2009,7 @@ struct bpf_array {
 };
 
 #define BPF_COMPLEXITY_LIMIT_INSNS      1000000 /* yes. 1M insns */
-#define MAX_TAIL_CALL_CNT 33
+#define MAX_TAIL_CALL_CNT 128
 
 /* Maximum number of loops for bpf_loop and bpf_iter_num.
  * It's enum to expose it (and thus make it discoverable) through BTF.
