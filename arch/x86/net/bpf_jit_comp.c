@@ -1571,11 +1571,15 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image, u8 *rw_image
 	int err;
 
 	/* Farbod: I added these for finding calls to `bpf_prefetch' */
-	const struct bpf_func_proto *_fn = \
-		bpf_base_func_proto(BPF_FUNC_prefetch, bpf_prog);
+	const struct bpf_func_proto *_fn;
+	_fn = bpf_base_func_proto(BPF_FUNC_prefetch, bpf_prog);
 	const s32 prefetch_offset = _fn->func - __bpf_call_base;
+
 	_fn = bpf_base_func_proto(BPF_FUNC_prefetch_1, bpf_prog);
 	const s32 prefetch_1_offset = _fn->func - __bpf_call_base;
+
+	_fn = bpf_base_func_proto(BPF_FUNC_prefetch_w, bpf_prog);
+	const s32 prefetch_w_offset = _fn->func - __bpf_call_base;
 
 	stack_depth = bpf_prog->aux->stack_depth;
 	priv_stack_ptr = bpf_prog->aux->priv_stack_ptr;
@@ -2342,6 +2346,11 @@ populate_extable:
 				EMIT2(0x0F, 0x18);
 				emit_insn_suffix(&prog, BPF_REG_1, PREFETCH1, 0);
 				break; /* done */
+			} else if (imm32 == prefetch_w_offset) {
+				printk("Replace a call to bpf_prefetch_w!\n");
+				// 0F 0D /1
+				EMIT2(0x0F, 0x0D);
+				emit_insn_suffix(&prog, BPF_REG_1, PREFETCH0, 0);
 			}
 
 			if (src_reg == BPF_PSEUDO_CALL && tail_call_reachable) {
