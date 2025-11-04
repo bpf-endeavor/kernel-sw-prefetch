@@ -5832,6 +5832,11 @@ union bpf_attr {
  *	Return
  *		Not important
  *
+ * long bpf_prefetch_nta(void *ptr)
+ *	Description
+ *		Prefetch a pointer
+ *	Return
+ *		Not important
  */
 #define ___BPF_FUNC_MAPPER(FN, ctx...)			\
 	FN(unspec, 0, ##ctx)				\
@@ -6049,6 +6054,7 @@ union bpf_attr {
 	FN(prefetch, 212, ##ctx)			\
 	FN(prefetch_1, 213, ##ctx)			\
 	FN(prefetch_w, 214, ##ctx)			\
+	FN(prefetch_nta, 215, ##ctx)			\
 	/* */
 	/* This helper list is effectively frozen. If you are trying to	\
 	 * add a new helper, you should add a kfunc instead which has	\

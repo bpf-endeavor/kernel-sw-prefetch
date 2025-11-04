@@ -1944,6 +1944,18 @@ static const struct bpf_func_proto bpf_prefetch_w_proto = {
 	.arg1_type	= ARG_ANYTHING,
 };
 
+BPF_CALL_1(bpf_prefetch_nta, void *, ptr__ign)
+{
+	return 0;
+}
+
+static const struct bpf_func_proto bpf_prefetch_nta_proto = {
+	.func		= bpf_prefetch_nta,
+	.gpl_only	= false,
+	.ret_type	= RET_INTEGER,
+	.arg1_type	= ARG_ANYTHING,
+};
+
 const struct bpf_func_proto bpf_get_current_task_proto __weak;
 const struct bpf_func_proto bpf_get_current_task_btf_proto __weak;
 const struct bpf_func_proto bpf_probe_read_user_proto __weak;
@@ -2010,6 +2022,8 @@ bpf_base_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &bpf_prefetch_1_proto;
 	case BPF_FUNC_prefetch_w:
 		return &bpf_prefetch_w_proto;
+	case BPF_FUNC_prefetch_nta:
+		return &bpf_prefetch_nta_proto;
 	default:
 		break;
 	}

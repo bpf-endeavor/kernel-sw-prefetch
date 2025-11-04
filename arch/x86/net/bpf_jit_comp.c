@@ -1581,6 +1581,9 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image, u8 *rw_image
 	_fn = bpf_base_func_proto(BPF_FUNC_prefetch_w, bpf_prog);
 	const s32 prefetch_w_offset = _fn->func - __bpf_call_base;
 
+	_fn = bpf_base_func_proto(BPF_FUNC_prefetch_nta, bpf_prog);
+	const s32 prefetch_nta_offset = _fn->func - __bpf_call_base;
+
 	stack_depth = bpf_prog->aux->stack_depth;
 	priv_stack_ptr = bpf_prog->aux->priv_stack_ptr;
 	if (priv_stack_ptr) {
@@ -2351,6 +2354,11 @@ populate_extable:
 				// 0F 0D /1
 				EMIT2(0x0F, 0x0D);
 				emit_insn_suffix(&prog, BPF_REG_1, PREFETCH0, 0);
+				break; /* done */
+			} else if (imm32 == prefetch_nta_offset) {
+				EMIT2(0x0F, 0x18);
+				emit_insn_suffix(&prog, BPF_REG_1, PREFETCHNTA, 0);
+				break; /* done */
 			}
 
 			if (src_reg == BPF_PSEUDO_CALL && tail_call_reachable) {

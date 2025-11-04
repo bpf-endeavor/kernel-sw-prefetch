@@ -59,6 +59,7 @@ static bool
 fs_mlx5e_xmit_xdp_frame(struct mlx5e_xdpsq *sq, struct mlx5e_xmit_data *xdptxd,
 		     int check_result, struct xsk_tx_metadata *meta)
 {
+	/* printk("here @ fs_mlx5e_xmit_xdp_frame\n"); */
 	struct mlx5e_xmit_data_frags *xdptxdf =
 		container_of(xdptxd, struct mlx5e_xmit_data_frags, xd);
 	struct mlx5_wq_cyc       *wq   = &sq->wq;
@@ -86,6 +87,7 @@ fs_mlx5e_xmit_xdp_frame(struct mlx5e_xdpsq *sq, struct mlx5e_xmit_data *xdptxd,
 
 	if (unlikely(!inline_ok || sq->hw_mtu < dma_len + frags_size)) {
 		stats->err++;
+		printk(KERN_ERR "farbod: mlx5: fs_mlx5e_xmit_xdp_frame: length isssue!\n");
 		return false;
 	}
 
@@ -112,8 +114,10 @@ fs_mlx5e_xmit_xdp_frame(struct mlx5e_xdpsq *sq, struct mlx5e_xmit_data *xdptxd,
 
 		check_result = fs_mlx5e_xmit_xdp_frame_check_stop_room(sq, stop_room);
 	}
-	if (unlikely(check_result < 0))
+	if (unlikely(check_result < 0)) {
+		printk(KERN_ERR "farbod: mlx5: fs_mlx5e_xmit_xdp_frame: check result failed!\n");
 		return false;
+	}
 
 	pi = fs_mlx5e_xdpsq_get_next_pi(sq, num_wqebbs);
 	wqe = mlx5_wq_cyc_get_wqe(wq, pi);
@@ -246,6 +250,7 @@ static bool
 fs_mlx5e_xmit_xdp_frame_mpwqe(struct mlx5e_xdpsq *sq, struct mlx5e_xmit_data *xdptxd,
 			   int check_result, struct xsk_tx_metadata *meta)
 {
+	/* printk("here @ fs_mlx5e_xmit_xdp_frame_mpwqe\n"); */
 	struct mlx5e_tx_mpwqe *session = &sq->mpwqe;
 	struct mlx5e_xdpsq_stats *stats = sq->stats;
 	struct mlx5e_xmit_data *p = xdptxd;
@@ -279,13 +284,16 @@ fs_mlx5e_xmit_xdp_frame_mpwqe(struct mlx5e_xdpsq *sq, struct mlx5e_xmit_data *xd
 
 	if (unlikely(p->len > sq->hw_mtu)) {
 		stats->err++;
+		printk(KERN_ERR "farbod: mlx5: fs_mlx5e_xmit_xdp_frame_mpwqe: length issue!\n");
 		return false;
 	}
 
 	if (!check_result)
 		check_result = fs_mlx5e_xmit_xdp_frame_check_mpwqe(sq);
-	if (unlikely(check_result < 0))
+	if (unlikely(check_result < 0)) {
+		printk(KERN_ERR "farbod: mlx5: fs_mlx5e_xmit_xdp_frame_mpwqe: check result failed!\n");
 		return false;
+	}
 
 	if (check_result == MLX5E_XDP_CHECK_START_MPWQE) {
 		/* Start the session when nothing can fail, so it's guaranteed
@@ -318,8 +326,10 @@ fs_mlx5e_xmit_xdp_buff(struct mlx5e_xdpsq *sq, struct mlx5e_rq *rq,
 	int i;
 
 	xdpf = xdp_convert_buff_to_frame(xdp);
-	if (unlikely(!xdpf))
+	if (unlikely(!xdpf)) {
+		printk(KERN_ERR "farbod: mlx5: failed to get xdp frame!\n");
 		return false;
+	}
 
 	xdptxd = &xdptxdf.xd;
 	xdptxd->data = xdpf->data;
@@ -396,11 +406,28 @@ fs_mlx5e_xmit_xdp_buff(struct mlx5e_xdpsq *sq, struct mlx5e_rq *rq,
 
 	xdptxd->dma_addr = dma_addr;
 
-	if (unlikely(!INDIRECT_CALL_2(sq->xmit_xdp_frame,
-					fs_mlx5e_xmit_xdp_frame_mpwqe,
-					fs_mlx5e_xmit_xdp_frame, sq, xdptxd,
-					0, NULL)))
+	/* Farbod: Why do I have these two functions? what is the difference from
+	 * the main one? */
+	int res;
+	if (sq->xmit_xdp_frame == mlx5e_xmit_xdp_frame_mpwqe) {
+		res = fs_mlx5e_xmit_xdp_frame_mpwqe(sq, xdptxd, 0, NULL);
+	} else if (sq->xmit_xdp_frame == mlx5e_xmit_xdp_frame) {
+		res = fs_mlx5e_xmit_xdp_frame(sq, xdptxd, 0, NULL);
+	} else {
+		// this must not happen :)
+		BUG_ON(true);
+	}
+	if (unlikely(!res)) {
 		return false;
+	}
+
+	/* Original code ^^^^^ */
+	/* if (unlikely(!INDIRECT_CALL_2(sq->xmit_xdp_frame, */
+	/* 				fs_mlx5e_xmit_xdp_frame_mpwqe, */
+	/* 				fs_mlx5e_xmit_xdp_frame, sq, xdptxd, */
+	/* 				0, NULL))) { */
+	/* 	return false; */
+	/* } */
 
 	/* xmit_mode == MLX5E_XDP_XMIT_MODE_PAGE */
 	mlx5e_xdpi_fifo_push(&sq->db.xdpi_fifo,
