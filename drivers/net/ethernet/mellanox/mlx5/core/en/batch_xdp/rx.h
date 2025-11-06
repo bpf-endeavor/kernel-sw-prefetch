@@ -367,13 +367,16 @@ xdp_abort:
 static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 		int budget, struct bpf_prog *prog)
 {
+	// holds the total queue entries we have processed. It must not exceed
+	// budget
 	u32 work_done = 0;
 
-	// TODO: check if this looping helps or not
 	while (work_done < budget) {
 		// It is important to reset the number of descriptors in the batch
 		clear_the_batch(rq);
 
+		// The user can set the batch size from /proc/mlx5_xdp_batch
+		// so limit the maximum batching with mini_budget
 		u32 w = 0;
 		u32 mini_budget = min_t(u32, budget - work_done, xdp_batch_size);
 
@@ -386,8 +389,8 @@ static int batch_xdp_poll_rx_cq(struct mlx5e_rq *rq, struct mlx5_cqwq *cqwq,
 			w = process_basic_cqe_comp(rq, cqwq, mini_budget);
 		}
 
+		// if there are no more work to do, then terminate the NAPI
 		if (w == 0) {
-			// if there are no more work to do, then terminate the NAPI
 			break;
 		}
 		work_done += w;

@@ -2356,6 +2356,7 @@ populate_extable:
 				emit_insn_suffix(&prog, BPF_REG_1, PREFETCH0, 0);
 				break; /* done */
 			} else if (imm32 == prefetch_nta_offset) {
+				printk("Replace a call to bpf_prefetch_nta!\n");
 				EMIT2(0x0F, 0x18);
 				emit_insn_suffix(&prog, BPF_REG_1, PREFETCHNTA, 0);
 				break; /* done */

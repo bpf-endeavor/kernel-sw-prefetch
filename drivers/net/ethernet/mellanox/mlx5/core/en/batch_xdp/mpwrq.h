@@ -199,16 +199,6 @@ void fs_batch_desc_mpwrq_nonlinear(struct mlx5e_rq *rq,
 
 	if (unlikely(mlx5e_page_alloc_fragmented(rq, &wi->linear_page))) {
 		rq->stats->buff_alloc_err++;
-
-		/* if (likely(wi->consumed_strides < rq->mpwqe.num_strides)) */
-		/* 	return; */
-
-		/* struct mlx5e_rx_wqe_ll *wqe; */
-		/* struct mlx5_wq_ll *wq; */
-		/* wq  = &rq->mpwqe.wq; */
-		/* wqe = mlx5_wq_ll_get_wqe(wq, be16_to_cpu(cqe->wqe_id)); */
-		/* mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index); */
-		/* return; */
 	}
 
 	va = page_address(wi->linear_page.page);
@@ -268,16 +258,6 @@ void fs_batch_desc_mpwrq_linear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *wi,
 	if (unlikely(cqe_bcnt > rq->hw_mtu)) {
 		rq->stats->oversize_pkts_sw_drop++;
 		return;
-
-		/* if (likely(wi->consumed_strides < rq->mpwqe.num_strides)) */
-		/* 	return; */
-
-		/* struct mlx5e_rx_wqe_ll *wqe; */
-		/* struct mlx5_wq_ll *wq; */
-		/* wq  = &rq->mpwqe.wq; */
-		/* wqe = mlx5_wq_ll_get_wqe(wq, be16_to_cpu(cqe->wqe_id)); */
-		/* mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index); */
-		/* return; */
 	}
 
 	va             = page_address(frag_page->page) + head_offset;
@@ -309,10 +289,10 @@ void fs_handle_rx_cqe_mpwrq(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
 	u32 wqe_offset     = stride_ix << rq->mpwqe.log_stride_sz;
 	u32 head_offset    = wqe_offset & ((1 << rq->mpwqe.page_shift) - 1);
 	u32 page_idx       = wqe_offset >> rq->mpwqe.page_shift;
-	/* struct mlx5e_rx_wqe_ll *wqe; */
-	/* struct mlx5_wq_ll *wq; */
 	u16 cqe_bcnt;
 
+	// NOTE: not all CQE are packets. Keep track of them so we can properly pop
+	// them out of the queue at the end of all this procedures.
 	u16 tmp_index = rq->xdp_rx_batch->wqe_ids.size++;
 	rq->xdp_rx_batch->wqe_ids.id[tmp_index] = wqe_id;
 
@@ -320,27 +300,13 @@ void fs_handle_rx_cqe_mpwrq(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
 
 	if (unlikely(MLX5E_RX_ERR_CQE(cqe))) {
 		mlx5e_handle_rx_err_cqe(rq, cqe);
-		/* if (likely(wi->consumed_strides < rq->mpwqe.num_strides)) */
-		/* 	return; */
-
-		/* wq  = &rq->mpwqe.wq; */
-		/* wqe = mlx5_wq_ll_get_wqe(wq, wqe_id); */
-		/* mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index); */
 		return;
 	}
 
 	if (unlikely(mpwrq_is_filler_cqe(cqe))) {
 		struct mlx5e_rq_stats *stats = rq->stats;
-
 		stats->mpwqe_filler_cqes++;
 		stats->mpwqe_filler_strides += cstrides;
-
-		/* if (likely(wi->consumed_strides < rq->mpwqe.num_strides)) */
-		/* 	return; */
-
-		/* wq  = &rq->mpwqe.wq; */
-		/* wqe = mlx5_wq_ll_get_wqe(wq, wqe_id); */
-		/* mlx5_wq_ll_pop(wq, cqe->wqe_id, &wqe->next.next_wqe_index); */
 		return;
 	}
 
